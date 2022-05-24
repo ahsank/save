@@ -24,6 +24,7 @@ Copyright(c) 2020 Futurewei Cloud
 #define CATCH_CONFIG_MAIN
 
 #include <skv/dto/SKVRecord.h>
+#include <skv/dto/K23SI.h>
 
 #include "catch.hpp"
 
@@ -54,6 +55,27 @@ void Test1Visitor<int32_t>(std::optional<int32_t> value, const String& fieldName
     REQUIRE(value);
     REQUIRE(fieldName == "Balance");
     REQUIRE(*value == 777);
+}
+
+template <typename T>
+Binary _serialize(T& obj) {
+    MPackWriter writer;
+    writer.write(obj);
+    Binary buf;
+    if (!writer.flush(buf)) {
+        throw std::runtime_error("Serialization failed");
+    }
+    return buf;
+}
+
+template <typename T>
+T _deserialize(Binary& buf) {
+    MPackReader reader(buf);
+    T obj;
+    if (!reader.read(obj)) {
+        throw dto::DeserializationError();
+    }
+    return obj;
 }
 
 // Simple partition and range keys, happy path tests
@@ -221,6 +243,30 @@ TEST_CASE("Test3: clone to other schema") {
     } catch (...) {}
 }
 
+void testRecord(const dto::Schema& schema, const dto::SKVRecord::Storage& storage, bool has_value) {
+    MPackWriter w;
+    w.write(storage);
+    Binary buf;
+    REQUIRE(w.flush(buf));
+    MPackReader reader(buf);
+    dto::SKVRecord::Storage read_storage{};
+    REQUIRE(reader.read(read_storage));
+    dto::SKVRecord reconstructed("collection", std::make_shared<dto::Schema>(schema),
+                                    std::move(read_storage), true);
+    std::optional<String> last = reconstructed.deserializeNext<String>();
+    REQUIRE(!last.has_value());
+    std::optional<String> first = reconstructed.deserializeNext<String>();
+    REQUIRE(first.has_value());
+    REQUIRE(first == "b");
+    std::optional<int32_t> balance = reconstructed.deserializeNext<int32_t>();
+    if (has_value) {
+        REQUIRE(balance.has_value());
+        REQUIRE(balance == 12);
+    } else {
+        REQUIRE(!balance.has_value());
+    }
+}
+
 TEST_CASE("Test4: getSKVKeyRecord test") {
     dto::Schema schema;
     schema.name = "test_schema";
@@ -240,24 +286,37 @@ TEST_CASE("Test4: getSKVKeyRecord test") {
 
     // Testing a typical use-case of getSKVKeyRecord where the storage is serialized
     // to payload and then read back later
-    dto::SKVRecord key_record = builder.build();
-    const dto::SKVRecord::Storage& storage = key_record.getStorage();
-    MPackWriter w;
-    w.write(storage);
-    Binary buf;
-    REQUIRE(w.flush(buf));
-    MPackReader reader(buf);
-    dto::SKVRecord::Storage read_storage{};
-    REQUIRE(reader.read(read_storage));
-    dto::SKVRecord reconstructed("collection", std::make_shared<dto::Schema>(schema),
-                                     std::move(read_storage), true);
-
-    std::optional<String> last = reconstructed.deserializeNext<String>();
-    REQUIRE(!last.has_value());
-    std::optional<String> first = reconstructed.deserializeNext<String>();
-    REQUIRE(first.has_value());
-    REQUIRE(first == "b");
-    std::optional<int32_t> balance = reconstructed.deserializeNext<int32_t>();
-    REQUIRE(!balance.has_value());
+    dto::SKVRecord doc = builder.build();
+    dto::SKVRecord key_record = doc.getSKVKeyRecord();
+    SECTION("full record") {
+        testRecord(schema, doc.getStorage(), true);
+    }
+    SECTION("key record") {
+        testRecord(schema, key_record.getStorage(), false);
+    }
 }
 
+TEST_CASE("Test5: empty reader test") {
+    MPackReader reader;
+    String value;
+    REQUIRE(!reader.read(value));
+}
+
+void logBuffer(char *data, size_t size) {
+    std::ostringstream ss;
+    for (size_t i = 0; i < size; ++i) {
+        ss << std::hex << std::setfill('0')
+            << std::setw(2) << (unsigned)(unsigned char)data[i] << " ";
+    }
+    K2LOG_I(log::dto, "Got buffer {}", ss.str());
+}
+
+TEST_CASE("Test6: serialize deserialize test") {
+    dto::K23SIBeginTxnResponse obj{dto::Timestamp(20220524, 1, 2)};
+    Binary&& buf = _serialize(obj);
+    logBuffer(buf.data(), buf.size());
+    std::string str(buf.data(), buf.size());
+    Binary buf1(std::move(str));
+    dto::K23SIBeginTxnResponse&& deserializedObj = _deserialize<dto::K23SIBeginTxnResponse>(buf1);
+    REQUIRE(obj.timestamp == deserializedObj.timestamp);    
+}
