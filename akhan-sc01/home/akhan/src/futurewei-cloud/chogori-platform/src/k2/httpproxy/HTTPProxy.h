@@ -24,11 +24,11 @@ Copyright(c) 2022 Futurewei Cloud
 #pragma once
 #include <k2/infrastructure/APIServer.h>
 #include <k2/module/k23si/client/k23si_client.h>
+#include <k2/common/ExpiryList.h>
 #include <skvhttp/common/Status.h>
 #include <skvhttp/dto/Collection.h>
 #include <skvhttp/dto/ControlPlaneOracle.h>
 #include <skvhttp/dto/K23SI.h>
-
 
 namespace k2 {
 namespace sh=skv::http;
@@ -151,11 +151,17 @@ private:
         std::unordered_map<uint64_t, Query> queries;
         Duration idleTimeout;
         TimePoint lastAccess;
+		TimePoint expiry() {return lastAccess+idleTimeout;}
+		nsbi::list_member_hook<> tsLink;
+		shd::Timestamp timestamp;
     };
 
-    // Called when txn is used by api. Updates last accessed without
-    // rearranging the expiry queue. Queue will be rearranged by the timer function.
-    void updateLastAccessed(ManagedTxn& txn) { txn.lastAccess = Clock::now();}
+    // Called when txn is used. It changes expiry without rearranging the expiry queue.
+    // The queue will be rearranged by the timer function in background.
+    void updateLastAccessed(ManagedTxn& txn) {
+		txn.lastAccess = Clock::now();
+		_expiryList.moveLast(txn);
+	}
 
     std::unordered_map<shd::Timestamp, ManagedTxn> _txns;
 
@@ -166,6 +172,7 @@ private:
             std::unordered_map<uint32_t, std::shared_ptr<shd::Schema>>
     >> _shdSchemas;
     ExpiryQueue<shd::Timestamp> _expiryQueue;
+	ExpiryList<ManagedTxn> _expiryList;
 
 };  // class HTTPProxy
 
