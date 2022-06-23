@@ -156,8 +156,8 @@ HTTPProxy::_handleTxnBegin(shd::TxnBeginRequest&& request){
             }
             else {
                 auto now = Clock::now();
-                _txns.insert(it, {shts, ManagedTxn{.handle=std::move(txn), .queries={}, .idleTimeout=idleTimeout, .lastAccess=now}});
-                _expiryQueue.add(shts, now + idleTimeout);
+                auto result = _txns.insert(it, {shts, ManagedTxn{.handle=std::move(txn), .queries={}, .idleTimeout=idleTimeout, .lastAccess=now, .tsLink={}, .timestamp=shts}});
+				_expiryList.add(result->second);
                 return MakeHTTPResponse<shd::TxnBeginResponse>(sh::Statuses::S201_Created(""), shd::TxnBeginResponse{.timestamp=shts});
             }
         });
@@ -449,7 +449,7 @@ HTTPProxy::HTTPProxy() : _client(K23SIClientConfig()) {
 
 seastar::future<> HTTPProxy::gracefulStop() {
     std::vector<seastar::future<>> futs;
-    _expiryQueue.stop().wait();
+	_expiryList.stop().wait();
     for (auto& [ts, txn]: _txns) {
         futs.push_back(txn.handle.kill());
     }
@@ -467,16 +467,13 @@ seastar::future<> HTTPProxy::start() {
     _registerAPI();
     return _client.start()
     .then([this] {
-        _expiryQueue.start([this](shd::Timestamp ts) {
-            auto it = _txns.find(ts);
-            if (it == _txns.end()) return seastar::make_ready_future<std::optional<TimePoint>>();
-            TimePoint expiry = it->second.lastAccess + it->second.idleTimeout;
-            if ( Clock::now() < expiry) return seastar::make_ready_future<std::optional<TimePoint>>(expiry);
-            return it->second.handle.kill()
+        _expiryList.start(10s, [this](ManagedTxn& txn) {
+			auto ts = txn.timestamp;
+            return txn.handle.kill()
                 .then([this, ts]{
                     K2LOG_I(log::httpproxy, "Removing txn {} because of timeout", ts);
                     _txns.erase(ts);
-                    return seastar::make_ready_future<std::optional<TimePoint>>();
+                    return seastar::make_ready_future<>();
                 });
         });
         return seastar::make_ready_future<>();
