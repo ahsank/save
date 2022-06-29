@@ -56,11 +56,10 @@ inline std::ostream& operator<<(std::ostream& os, const TxnPriority& pri) {
 }
 
 struct TxnOptions {
-    Duration txnTimeout{60s};
-    Duration opTimeout{1s};
+    Duration timeout{1s};
     TxnPriority priority{TxnPriority::Medium};
     bool syncFinalize{false};
-    K2_SERIALIZABLE_FMT(TxnOptions, txnTimeout, opTimeout, priority, syncFinalize);
+    K2_SERIALIZABLE_FMT(TxnOptions, timeout, priority, syncFinalize);
 };
 
 K2_DEF_ENUM(ExistencePrecondition,
@@ -121,9 +120,10 @@ struct WriteRequest {
     SKVRecord::Storage value; // the value of the write. Contains a value for each field
 
     // if size() > 0 then this is a partial update, and this vector contains the indices of the new field values
-    std::vector<uint32_t> fieldsForPartialUpdate;
+    std::vector<String> fieldsForPartialUpdate;
+    SKVRecord::Storage key;   // Only set key for partial update
 
-    K2_SERIALIZABLE_FMT(WriteRequest, timestamp, collectionName, schemaName, isDelete, precondition, value, fieldsForPartialUpdate);
+    K2_SERIALIZABLE_FMT(WriteRequest, timestamp, collectionName, schemaName, isDelete, precondition, value, fieldsForPartialUpdate, key);
 };
 
 struct WriteResponse {
