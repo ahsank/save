@@ -129,6 +129,29 @@ class TestHTTP(unittest.TestCase):
         status = txn.end()
         self.assertTrue(status.is2xxOK())
 
+        # Test partial update
+        # Begin Txn
+        status, txn = TestHTTP.cl.begin_txn()
+        self.assertTrue(status.is2xxOK())
+
+        # Write partial upate
+        record = TestHTTP.schema.make_record(data=b"mydata_update")
+        record.fieldsForPartialUpdate = [b"data"]
+        key = TestHTTP.schema.make_record(partitionKey=b"test1pk", rangeKey=b"test1rk")
+        status = txn.write(TestHTTP.cname, record, key=key)
+        self.assertTrue(status.is2xxOK(), msg=status.message)
+
+        # read data
+        status, resultRec = txn.read(TestHTTP.cname, key)
+        self.assertTrue(status.is2xxOK());
+        self.assertEqual(resultRec.fields.partitionKey, b"test1pk")
+        self.assertEqual(resultRec.fields.rangeKey, b"test1rk")
+        self.assertEqual(resultRec.fields.data, b"mydata_update")
+
+        # Commit
+        status = txn.end()
+        self.assertTrue(status.is2xxOK())
+
 
     def test_validation(self):
         record = TestHTTP.schema.make_record(partitionKey=b"test2pk", rangeKey=b"test1rk", data=b"mydata")
@@ -466,26 +489,27 @@ class TestHTTP(unittest.TestCase):
         self.assertTrue(status.is2xxOK())
 
     def test_txn_timeout(self):
-        # Begin Txn with timeout 1s
-        status, txn = TestHTTP.cl.begin_txn(TxnOptions(TimeDelta(seconds=1)))
+        # The tests assume that txn timeout is set to 100ms (httpproxy_txn_timeout)
+        # Begin Txn
+        status, txn = TestHTTP.cl.begin_txn()
         self.assertTrue(status.is2xxOK())
 
-        # Sleep 1.6s for txn to timeout
-        sleep(1.6)
+        # Sleep 160ms for txn to timeout
+        sleep(0.16)
         status = txn.end()
         self.assertEqual(status.code, 410)
 
-        status, txn = TestHTTP.cl.begin_txn(TxnOptions(TimeDelta(seconds=1)))
+        status, txn = TestHTTP.cl.begin_txn()
         self.assertTrue(status.is2xxOK())
 
-        # Sleep 0.8 and write, it should succeed because within timeout
-        sleep(0.8)
+        # Sleep 80ms and write, it should succeed because within timeout
+        sleep(0.08)
         record = TestHTTP.schema.make_record(partitionKey=b"ptest6", rangeKey=b"rtest6", data=b"data6")
         status = txn.write(TestHTTP.cname, record)
         self.assertTrue(status.is2xxOK())
 
-        # Sleep additional 0.8s and commit, should succeed as timeout pushed back because of write
-        sleep(0.8)
+        # Sleep additional 80ms and commit, should succeed as timeout pushed back because of write
+        sleep(0.08)
         # Commit
         status = txn.end()
         self.assertTrue(status.is2xxOK())
