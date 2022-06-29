@@ -140,14 +140,13 @@ class TxnPriority(int, Enum):
         return self.value
 
 class TxnOptions:
-    def __init__(self, txnTimeout=TimeDelta(seconds=60), opTimeout=TimeDelta(seconds=10), priority=TxnPriority.Medium, syncFinalize: bool = False):
-        self.txnTimeout = txnTimeout
-        self.opTimeout = opTimeout
+    def __init__(self, timeout=TimeDelta(seconds=10), priority=TxnPriority.Medium, syncFinalize: bool = False):
+        self.timeout = timeout
         self.priority = priority
         self.syncFinalize = syncFinalize
 
     def serialize(self):
-        return [self.txnTimeout.serialize(), self.opTimeout.serialize(), self.priority.serialize(), self.syncFinalize]
+        return [self.timeout.serialize(), self.priority.serialize(), self.syncFinalize]
 
 class EndAction(int, Enum):
     NONE:       int     = 0
@@ -169,12 +168,15 @@ class Txn:
         self.client = client
         self.timestamp = timestamp
 
-    def write(self, collection, record, erase=False, precondition=ExistencePrecondition.Nil) -> Status:
+    def write(self, collection, record, erase=False, precondition=ExistencePrecondition.Nil, key = None) -> Status:
         "Write record"
         record.timestamp = self.timestamp
+        if not key:
+            key = Record(record.schemaName, record.schemaVersion);
         status, _ = self.client.make_call('/api/Write',
             [self.timestamp, collection, record.schemaName,
-             erase, precondition.serialize(), record.serialize(), record.fieldsForPartialUpdate])
+             erase, precondition.serialize(), record.serialize(), record.fieldsForPartialUpdate,
+             key.serialize()])
         return status
 
     def read(self, collection, keyrec) :
