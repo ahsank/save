@@ -34,55 +34,6 @@ namespace k2 {
 namespace sh=skv::http;
 namespace shd=skv::http::dto;
 
-// Priority queue based expiry timer to handle txns of different timeout
-template <class T, class ClockT=Clock>
-class ExpiryQueue {
-public:
-    void add(T val, TimePoint expiry) {
-        _queue.push(std::make_pair(expiry, val));
-    }
-
-    // The FN takes element ID as parameter, returns empty if element is expired/removed.
-    // If the element not expired because it's expiry time was updated, it returns the new expiry time
-    typedef std::function<seastar::future<std::optional<TimePoint>>(T)> FN;
-
-    void start(FN&& func) {
-        _expiryTimer.setCallback([this, func=std::move(func)] {
-            return seastar::do_until(
-                [this] {return _queue.empty() || _queue.top().first > ClockT::now();},
-                [this, func=std::move(func)]{
-                // Copy top element value and remove
-                T elem = _queue.top().second;
-                _queue.pop();
-                return func(elem)
-                    .then([this, elem](auto new_expiry) {
-                        if (new_expiry) {
-                            _queue.push(std::make_pair(*new_expiry, elem));
-                        }
-                        return seastar::make_ready_future<>();
-                    });
-                });
-        });
-        _expiryTimer.armPeriodic(_minTimeout/2);
-    }
-
-    seastar::future<> stop() {
-        return _expiryTimer.stop();
-    }
-
-private:
-    typedef std::pair<TimePoint, T> ElemT;
-
-    struct GreaterComp {
-        constexpr bool operator()(const ElemT &lhs, const ElemT &rhs) const {return lhs.first > rhs.first;}
-    };
-    PeriodicTimer _expiryTimer;
-    // Maximum supported resolution of expiry time.
-    Duration _minTimeout{1s};
-    // Min element on top, ordered by expiry time
-    std::priority_queue<ElemT, std::vector<ElemT>, GreaterComp> _queue;
-};
-
 // Utility function to generate e response of a given type
 template <typename ...T>
 inline seastar::future<sh::Response<T...>> MakeHTTPResponse(sh::Status s, T&&... r) {
@@ -120,6 +71,12 @@ private:
     seastar::future<std::tuple<sh::Status, sh::dto::WriteResponse>>
         _handleWrite(sh::dto::WriteRequest&& request);
 
+    seastar::future<std::tuple<sh::Status, shd::WriteResponse>>
+        _handleWrite(K2TxnHandle& txn, shd::WriteRequest&& request, dto::SKVRecord&& k2record);
+
+    seastar::future<std::tuple<sh::Status, shd::WriteResponse>>
+        _handlePartialUpdate(K2TxnHandle& txn, shd::WriteRequest&& request, dto::SKVRecord&& k2record, const std::shared_ptr<k2::dto::Schema>& k2Schema, const std::shared_ptr<shd::Schema>& shdSchema);
+
     seastar::future<std::tuple<sh::Status, sh::dto::ReadResponse>>
         _handleRead(sh::dto::ReadRequest&& request);
 
@@ -149,19 +106,16 @@ private:
     struct ManagedTxn {
         k2::K2TxnHandle handle;
         std::unordered_map<uint64_t, Query> queries;
-        Duration idleTimeout;
-        TimePoint lastAccess;
-		TimePoint expiry() {return lastAccess+idleTimeout;}
-		nsbi::list_member_hook<> tsLink;
-		shd::Timestamp timestamp;
+        TimePoint expiryTime;
+        TimePoint expiry() {return expiryTime;}  // Used by ExpiryList
+        nsbi::list_member_hook<> tsLink;  // Used by ExpiryList
+        shd::Timestamp timestamp; // Used to remove element from _txns
     };
 
-    // Called when txn is used. It changes expiry without rearranging the expiry queue.
-    // The queue will be rearranged by the timer function in background.
-    void updateLastAccessed(ManagedTxn& txn) {
-		txn.lastAccess = Clock::now();
-		_expiryList.moveLast(txn);
-	}
+    void updateExpiry(ManagedTxn& txn) {
+        txn.expiryTime = Clock::now() + _txnTimeout();
+        _expiryList.moveToEnd(txn);
+    }
 
     std::unordered_map<shd::Timestamp, ManagedTxn> _txns;
 
@@ -171,9 +125,9 @@ private:
         std::unordered_map<String,
             std::unordered_map<uint32_t, std::shared_ptr<shd::Schema>>
     >> _shdSchemas;
-    ExpiryQueue<shd::Timestamp> _expiryQueue;
-	ExpiryList<ManagedTxn> _expiryList;
-
+    ExpiryList<ManagedTxn, &ManagedTxn::tsLink> _expiryList;
+    // Txn idle timeout
+    ConfigDuration _txnTimeout{"httpproxy_txn_timeout", 60s};
 };  // class HTTPProxy
 
 } // namespace k2
