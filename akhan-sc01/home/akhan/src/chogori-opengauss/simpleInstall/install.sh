@@ -212,7 +212,7 @@ function set_environment() {
 
 function single_install() {
     info "[step 6]: init datanode"
-    gdb --args gs_initdb -d -w $password -D $app/data/single_node --nodename "sgnode" --locale="en_US.UTF-8"
+    gdb --args gs_initdb -w $password -D $app/data/single_node --nodename "sgnode" --locale="en_US.UTF-8"
     if [ X$port != X$default_port  ]
     then
         sed -i "/^#port =/c\port = $port" $app/data/single_node/postgresql.conf
@@ -223,9 +223,9 @@ function single_install() {
 
 function init_db() {
     info "[init primary datanode.]"
-    gs_initdb -d -D $app/data/master --nodename=datanode1 -E UTF-8 --locale=en_US.UTF-8 -U $user  -w $password
+    gs_initdb -D $app/data/master --nodename=datanode1 -E UTF-8 --locale=en_US.UTF-8 -U $user  -w $password
     info "[init slave datanode.]"
-    gs_initdb -d -D $app/data/slave --nodename=datanode2 -E UTF-8 --locale=en_US.UTF-8 -U $user  -w $password
+    gs_initdb -D $app/data/slave --nodename=datanode2 -E UTF-8 --locale=en_US.UTF-8 -U $user  -w $password
 }
 
 function config_db() {
