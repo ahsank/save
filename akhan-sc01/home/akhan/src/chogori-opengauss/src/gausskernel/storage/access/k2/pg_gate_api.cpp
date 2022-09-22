@@ -24,68 +24,106 @@ Copyright(c) 2022 Futurewei Cloud
 // When we mix certain C++ standard lib code and pg code there seems to be a macro conflict that
 // will cause compiler errors in libintl.h. Including as the first thing fixes this.
 #include <libintl.h>
+#include <unordered_map>
+#include <assert.h>
+#include <atomic>
+#include <memory>
 
 #include "access/k2/pg_gate_api.h"
+#include "access/k2/pg_memctx.h"
+#include "access/k2/pg_ids.h"
 
 #include "k2pg-internal.h"
 #include "session.h"
+#include "access/k2/pg_session.h"
+#include "access/k2/k2_util.h"
+#include "storage.h"
 #include "access/k2/k2pg_util.h"
 
 #include "utils/elog.h"
+#include "utils/errcodes.h"
 #include "pg_gate_defaults.h"
 #include "pg_gate_thread_local.h"
 #include "catalog/sql_catalog_client.h"
+#include "catalog/sql_catalog_manager.h"
 
-#include <atomic>
-
-namespace k2pg {
-namespace gate {
+using namespace k2pg::gate;
 
 namespace {
-// Using a raw pointer here to fully control object initialization and destruction.
-// k2pg::gate::PgGateApiImpl* api_impl;
-std::atomic<bool> api_impl_shutdown_done;
 
-catalog::SqlCatalogClient* GetCatalog() {
-    static auto catalogManager = std::make_shared<catalog::SqlCatalogManager>();
-    static auto catalog = new catalog::SqlCatalogClient(catalogManager);
-    return catalog;
-}
+    class PgGate {
+        public:
+        // TODO: remove K2PgTypeEntity to map to use type oid to map to k2 type directly
+        PgGate(const K2PgTypeEntity *k2PgDataTypeArray, int count, K2PgCallbacks callbacks) {
+            // Setup type mapping.
+            for (int idx = 0; idx < count; idx++) {
+                const K2PgTypeEntity *type_entity = &k2PgDataTypeArray[idx];
+                type_map_[type_entity->type_oid] = type_entity;
+            }
+            catalog_manager_ = std::make_shared<k2pg::catalog::SqlCatalogManager>();
+            catalog_manager_->Start();
+        };
 
+        ~PgGate() {
+              catalog_manager_->Shutdown();
+        };
+
+        std::shared_ptr<k2pg::catalog::SqlCatalogClient> GetCatalogClient() {
+              return k2pg::pg_session->GetCatalogClient();
+        };
+
+        std::shared_ptr<k2pg::catalog::SqlCatalogManager> GetCatalogManager() {
+              return catalog_manager_;
+        };
+
+        const K2PgTypeEntity *FindTypeEntity(int type_oid) {
+              const auto iter = type_map_.find(type_oid);
+              if (iter != type_map_.end()) {
+                  return iter->second;
+              }
+              return nullptr;
+        };
+
+        private:
+        K2PgCallbacks pg_callbacks_;
+
+        // Mapping table of K2PG and PostgreSQL datatypes.
+        std::unordered_map<int, const K2PgTypeEntity *> type_map_;
+
+        std::shared_ptr<k2pg::catalog::SqlCatalogManager> catalog_manager_;
+
+    };
+
+    // use anonymous namespace to define a static variable that is not exposed outside of this file
+    std::shared_ptr<PgGate> pg_gate;
 } // anonymous namespace
 
-extern "C" {
-
 void PgGate_InitPgGate(const K2PgTypeEntity *k2PgDataTypeTable, int count, PgCallbacks pg_callbacks) {
+    assert(pg_gate == nullptr && "PgGate should only be initialized once");
     elog(INFO, "K2 PgGate open");
-    // K2ASSERT(log::k2pg, gCatalog == nullptr, "can only be called once");
-
-    api_impl_shutdown_done.exchange(false);
+    K2LOG_I(::k2pg::log::k2pg, "Initializing Pggate");
+    pg_gate = std::make_shared<PgGate>(k2PgDataTypeTable, count, pg_callbacks);
 }
 
 void PgGate_DestroyPgGate() {
-    if (api_impl_shutdown_done.exchange(true)) {
-      elog(ERROR, "should only be called once");
+    if (pg_gate == nullptr) {
+      elog(ERROR, "PgGate is destroyed or not initialized");
     } else {
+      pg_gate = nullptr;
       elog(INFO, "K2 PgGate destroyed");
     }
 }
 
 // Initialize a session to process statements that come from the same client connection.
 K2PgStatus PgGate_InitSession(const char *database_name) {
-  elog(LOG, "PgGateAPI: PgGate_InitSession %s", database_name);
+    elog(LOG, "PgGateAPI: PgGate_InitSession %s", database_name);
 
-  k2pg::TXMgr.Init();
-  k2pg::TXMgr.EndTxn(skv::http::dto::EndAction::Abort);
+    k2pg::TXMgr.Init();
+    k2pg::TXMgr.EndTxn(skv::http::dto::EndAction::Abort);
 
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 1",
-      .detail = ""
-  };
-
-  return status;
+    std::shared_ptr<k2pg::catalog::SqlCatalogClient> catalog_client = std::make_shared<k2pg::catalog::SqlCatalogClient>(pg_gate->GetCatalogManager());
+    k2pg::pg_session = std::make_shared<k2pg::PgSession>(catalog_client, database_name);
+    return K2PgStatus::OK;
 }
 
 // Initialize K2PgMemCtx.
@@ -96,72 +134,41 @@ K2PgStatus PgGate_InitSession(const char *database_name) {
 //   Postgres operations are done, associated K2PG memory context (K2PgMemCtx) will be
 //   destroyed toghether with Postgres memory context.
 K2PgMemctx PgGate_CreateMemctx() {
-  elog(DEBUG5, "PgGateAPI: PgGate_CreateMemctx");
-  return nullptr;
+    elog(DEBUG5, "PgGateAPI: PgGate_CreateMemctx");
+    // Postgres will create PG Memctx when it first use the Memctx to allocate K2PG object.
+    return k2pg::PgMemctx::Create();
 }
 
 K2PgStatus PgGate_DestroyMemctx(K2PgMemctx memctx) {
-  elog(DEBUG5, "PgGateAPI: PgGate_DestroyMemctx");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 2",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_DestroyMemctx");
+    // Postgres will destroy PG Memctx by releasing the pointer.
+    return k2pg::PgMemctx::Destroy(memctx);
 }
 
 K2PgStatus PgGate_ResetMemctx(K2PgMemctx memctx) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ResetMemctx");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 3",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_ResetMemctx");
+    // Postgres reset PG Memctx when clearing a context content without clearing its nested context.
+    return k2pg::PgMemctx::Reset(memctx);
 }
 
 // Invalidate the sessions table cache.
 K2PgStatus PgGate_InvalidateCache() {
-  elog(DEBUG5, "PgGateAPI: PgGate_InvalidateCache");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 4",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_InvalidateCache");
+    k2pg::pg_session->InvalidateCache();
+    return K2PgStatus::OK;
 }
 
 // Check if initdb has been already run.
 K2PgStatus PgGate_IsInitDbDone(bool* initdb_done) {
-  elog(DEBUG5, "PgGateAPI: PgGate_IsInitDbDone");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 5",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_IsInitDbDone");
+    return pg_gate->GetCatalogClient()->IsInitDbDone(initdb_done);
 }
 
 // Sets catalog_version to the local tserver's catalog version stored in shared
 // memory, or an error if the shared memory has not been initialized (e.g. in initdb).
 K2PgStatus PgGate_GetSharedCatalogVersion(uint64_t* catalog_version) {
-  elog(DEBUG5, "PgGateAPI: PgGate_GetSharedCatalogVersion");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 6",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_GetSharedCatalogVersion");
+    return pg_gate->GetCatalogClient()->GetCatalogVersion(catalog_version);
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -169,60 +176,21 @@ K2PgStatus PgGate_GetSharedCatalogVersion(uint64_t* catalog_version) {
 //--------------------------------------------------------------------------------------------------
 
 // K2 InitPrimaryCluster
-K2PgStatus PgGate_InitPrimaryCluster()
-{
-  elog(DEBUG5, "PgGateAPI: PgGate_InitPrimaryCluster");
-  // volatile int i = 0;
-
-  // while (i == 0) {
-  //     sleep(1);  // sleep for 1 seconds
-  // }
-
-  auto catalog = GetCatalog();
-  auto skvstat = catalog->InitPrimaryCluster();
-  if (skvstat.is2xxOK()) {
-      return K2PgStatus {
-          .pg_code = ERRCODE_SUCCESSFUL_COMPLETION,
-          .k2_code = skvstat.code,
-          .msg = "ok",
-          .detail = "ok"
-      };
-  }
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = skvstat.message,
-      .detail = ""
-  };
-
-  return status;
+K2PgStatus PgGate_InitPrimaryCluster() {
+    elog(DEBUG5, "PgGateAPI: PgGate_InitPrimaryCluster");
+    return pg_gate->GetCatalogClient()->InitPrimaryCluster();
 }
 
-K2PgStatus PgGate_FinishInitDB()
-{
-  elog(DEBUG5, "PgGateAPI: PgGate_FinishInitDB()");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 8",
-      .detail = ""
-  };
-
-  return status;
+K2PgStatus PgGate_FinishInitDB() {
+    elog(DEBUG5, "PgGateAPI: PgGate_FinishInitDB()");
+    return pg_gate->GetCatalogClient()->FinishInitDB();
 }
 
 // DATABASE ----------------------------------------------------------------------------------------
 // Connect database. Switch the connected database to the given "database_name".
 K2PgStatus PgGate_ConnectDatabase(const char *database_name) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ConnectDatabase %s", database_name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 9",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_ConnectDatabase %s", database_name);
+    return k2pg::pg_session->ConnectDatabase(database_name);
 }
 
 // Create database.
@@ -232,28 +200,19 @@ K2PgStatus PgGate_ExecCreateDatabase(const char *database_name,
                                  K2PgOid next_oid) {
   elog(LOG, "PgGateAPI: PgGate_ExecCreateDatabase %s, %d, %d, %d",
          database_name, database_oid, source_database_oid, next_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 10",
-      .detail = ""
-  };
-
-  return status;
+  return pg_gate->GetCatalogClient()->CreateDatabase(database_name,
+      k2pg::PgObjectId::GetDatabaseUuid(database_oid),
+      database_oid,
+      source_database_oid != k2pg::kPgInvalidOid ? k2pg::PgObjectId::GetDatabaseUuid(source_database_oid) : "",
+      "" /* creator_role_name */, next_oid);
 }
 
 // Drop database.
 K2PgStatus PgGate_ExecDropDatabase(const char *database_name,
                                    K2PgOid database_oid) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ExecDropDatabase %s, %d", database_name, database_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 11",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_ExecDropDatabase %s, %d", database_name, database_oid);
+    return pg_gate->GetCatalogClient()->DeleteDatabase(database_name,
+        k2pg::PgObjectId::GetDatabaseUuid(database_oid));
 }
 
 // Alter database.
@@ -261,38 +220,17 @@ K2PgStatus PgGate_NewAlterDatabase(const char *database_name,
                                K2PgOid database_oid,
                                K2PgStatement *handle) {
   elog(DEBUG5, "PgGateAPI: PgGate_NewAlterDatabase %s, %d", database_name, database_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 12",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AlterDatabaseRenameDatabase(K2PgStatement handle, const char *new_name) {
   elog(DEBUG5, "PgGateAPI: PgGate_AlterDatabaseRenameDatabase %s", new_name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 13",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExecAlterDatabase(K2PgStatement handle) {
   elog(DEBUG5, "PgGateAPI: PgGate_ExecAlterDatabase");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 14",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Reserve oids.
@@ -301,56 +239,94 @@ K2PgStatus PgGate_ReserveOids(K2PgOid database_oid,
                            uint32_t count,
                            K2PgOid *begin_oid,
                            K2PgOid *end_oid) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ReserveOids %d, %d, %d", database_oid, next_oid, count);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 15",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_ReserveOids %d, %d, %d", database_oid, next_oid, count);
+    return pg_gate->GetCatalogClient()->ReservePgOids(database_oid, next_oid, count, begin_oid, end_oid);
 }
 
 K2PgStatus PgGate_GetCatalogMasterVersion(uint64_t *version) {
-  elog(DEBUG5, "PgGateAPI: PgGate_GetCatalogMasterVersion");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 16",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_GetCatalogMasterVersion");
+    return pg_gate->GetCatalogClient()->GetCatalogVersion(version);
 }
 
 void PgGate_InvalidateTableCache(
     const K2PgOid database_oid,
     const K2PgOid table_oid) {
-  elog(DEBUG5, "PgGateAPI: PgGate_InvalidateTableCache %d, %d", database_oid, table_oid);
+    elog(DEBUG5, "PgGateAPI: PgGate_InvalidateTableCache %d, %d", database_oid, table_oid);
+    const k2pg::PgObjectId table_object_id(database_oid, table_oid);
+    k2pg::pg_session->InvalidateTableCache(table_object_id);
 }
 
 K2PgStatus PgGate_InvalidateTableCacheByTableId(const char *table_uuid) {
-  elog(DEBUG5, "PgGateAPI: PgGate_InvalidateTableCacheByTableId %s", table_uuid);
-  if (table_uuid == NULL) {
-    K2PgStatus status {
-        .pg_code = ERRCODE_FDW_ERROR,
-        .k2_code = 400,
-        .msg = "Invalid argument",
-        .detail = "table_uuid is null"
-    };
+    elog(DEBUG5, "PgGateAPI: PgGate_InvalidateTableCacheByTableId %s", table_uuid);
+    if (table_uuid == NULL) {
+        K2PgStatus status {
+            .pg_code = ERRCODE_FDW_ERROR,
+            .k2_code = 400,
+            .msg = "Invalid argument",
+            .detail = "table_uuid is null"
+        };
 
-    return status;
-  }
+        return status;
+    }
+    std::string table_uuid_str = table_uuid;
+    const k2pg::PgObjectId table_object_id(table_uuid_str);
+    k2pg::pg_session->InvalidateTableCache(table_object_id);
+    return K2PgStatus::OK;
+}
 
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 17",
-      .detail = ""
-  };
+// Make ColumnSchema from column information
+k2pg::ColumnSchema makeColumn(const std::string& col_name, int order, K2SqlDataType k2pg_type, bool is_key, bool is_desc, bool is_nulls_first) {
+    using SortingType = k2pg::ColumnSchema::SortingType;
+    SortingType sorting_type = SortingType::kNotSpecified;
+    if (is_key) {
+        if (is_desc) {
+            sorting_type = is_nulls_first ? SortingType::kDescending : SortingType::kDescendingNullsLast;
+        } else {
+            sorting_type = is_nulls_first ? SortingType::kAscending : SortingType::kAscendingNullsLast;
+        }
+    }
+    std::shared_ptr<k2pg::SQLType> data_type = k2pg::SQLType::Create(static_cast<DataType>( k2pg_type));
+    bool is_nullable = !is_key;
+    return k2pg::ColumnSchema(col_name, data_type, is_nullable, is_key, order, order, sorting_type);
+}
 
-  return status;
+std::tuple<k2pg::Status, bool, k2pg::Schema> makeSChema(const std::string& schema_name, const std::vector<K2PGColumnDef>& columns, bool add_primary_key = false) {
+    std::vector<k2pg::ColumnSchema> k2pgcols;
+    std::vector<k2pg::ColumnId> colIds;
+    int num_key_columns = 0;
+    const bool is_pg_catalog_table = (schema_name == "pg_catalog") || (schema_name == "information_schema");
+
+    // Add internal primary key column to a Postgres table without a user-specified primary key.
+    if (add_primary_key) {
+        // For regular user table, k2pgrowid should be a hash key because k2pgrowid is a random uuid.
+        k2pgcols.push_back(makeColumn("k2pgrowid",
+                static_cast<int32_t>(k2pg::PgSystemAttrNum::kPgRowId),
+                static_cast<DataType>( K2SQL_DATA_TYPE_BINARY),
+                true /* is_key */, false /* is_desc */, false /* is_nulls_first */));
+    }
+    // Add key columns at the beginning
+    for (auto& col : columns) {
+        if (!col.is_key) {
+            continue;
+        }
+        num_key_columns++;
+        k2pgcols.push_back(makeColumn(col.attr_name, col.attr_num, col.attr_type->k2pg_type, col.is_key, col.is_desc, col.is_nulls_first));
+    }
+    // Add data columns
+    for (auto& col : columns) {
+        if (col.is_key) {
+            continue;
+        }
+
+        k2pgcols.push_back(makeColumn(col.attr_name, col.attr_num, col.attr_type->k2pg_type, col.is_key, col.is_desc, col.is_nulls_first));
+    }
+    // Get column ids
+    for (size_t i=0; i < k2pgcols.size(); i++) {
+        colIds.push_back(k2pg::ColumnId(i));
+    }
+    k2pg::Schema schema;
+    auto status = schema.Reset(k2pgcols, colIds, num_key_columns);
+    return std::make_tuple(std::move(status), is_pg_catalog_table, std::move(schema));
 }
 
 // TABLE -------------------------------------------------------------------------------------------
@@ -366,92 +342,48 @@ K2PgStatus PgGate_ExecCreateTable(const char *database_name,
                               bool if_not_exist,
                               bool add_primary_key,
                               const std::vector<K2PGColumnDef>& columns) {
-  elog(DEBUG5, "PgGateAPI: PgGate_NewCreateTable %s, %s, %s", database_name, schema_name, table_name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 18",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_NewCreateTable %s, %s, %s", database_name, schema_name, table_name);
+    auto [status, is_pg_catalog_table, schema] = makeSChema(schema_name, columns);
+    if (!status.ok()) {
+        return status;
+    }
+    const k2pg::PgObjectId table_object_id(database_oid, table_oid);
+    return pg_gate->GetCatalogClient()->CreateTable(database_name, table_name, table_object_id, schema, is_pg_catalog_table, false /* is_shared_table */, if_not_exist);
 }
 
 K2PgStatus PgGate_NewAlterTable(K2PgOid database_oid,
                              K2PgOid table_oid,
                              K2PgStatement *handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewAlterTable %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 19",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AlterTableAddColumn(K2PgStatement handle, const char *name, int order,
                                    const K2PgTypeEntity *attr_type, bool is_not_null){
   elog(DEBUG5, "PgGateAPI: PgGate_AlterTableAddColumn %s", name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 20",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AlterTableRenameColumn(K2PgStatement handle, const char *oldname,
                                       const char *newname){
   elog(DEBUG5, "PgGateAPI: PgGate_AlterTableRenameColumn %s, %s", oldname, newname);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 21",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AlterTableDropColumn(K2PgStatement handle, const char *name){
   elog(DEBUG5, "PgGateAPI: PgGate_AlterTableDropColumn %s", name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 22",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AlterTableRenameTable(K2PgStatement handle, const char *db_name,
                                      const char *newname){
   elog(DEBUG5, "PgGateAPI: PgGate_AlterTableRenameTable %s, %s", db_name, newname);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 23",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExecAlterTable(K2PgStatement handle){
   elog(DEBUG5, "PgGateAPI: PgGate_ExecAlterTable");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 24",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_NewDropTable(K2PgOid database_oid,
@@ -459,40 +391,19 @@ K2PgStatus PgGate_NewDropTable(K2PgOid database_oid,
                             bool if_exist,
                             K2PgStatement *handle) {
   elog(DEBUG5, "PgGateAPI: PgGate_NewDropTable %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 25",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExecDropTable(K2PgStatement handle){
   elog(DEBUG5, "PgGateAPI: PgGate_ExecDropTable");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 26",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_GetTableDesc(K2PgOid database_oid,
                             K2PgOid table_oid,
                             K2PgTableDesc *handle) {
   elog(DEBUG5, "PgGateAPI: PgGate_GetTableDesc %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 27",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_GetColumnInfo(K2PgTableDesc table_desc,
@@ -500,51 +411,23 @@ K2PgStatus PgGate_GetColumnInfo(K2PgTableDesc table_desc,
                              bool *is_primary,
                              bool *is_hash) {
   elog(DEBUG5, "PgGateAPI: PgGate_GetTableDesc %d", attr_number);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 28",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_GetTableProperties(K2PgTableDesc table_desc,
                                   K2PgTableProperties *properties){
   elog(DEBUG5, "PgGateAPI: PgGate_GetTableProperties");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 29",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_SetIsSysCatalogVersionChange(K2PgStatement handle){
   elog(DEBUG5, "PgGateAPI: PgGate_SetIsSysCatalogVersionChange");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 30",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_SetCatalogCacheVersion(K2PgStatement handle, uint64_t catalog_cache_version){
   elog(DEBUG5, "PgGateAPI: PgGate_SetCatalogCacheVersion %ld", catalog_cache_version);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 31",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // INDEX -------------------------------------------------------------------------------------------
@@ -562,15 +445,14 @@ K2PgStatus PgGate_ExecCreateIndex(const char *database_name,
                               const bool skip_index_backfill,
                               bool if_not_exist,
                               const std::vector<K2PGColumnDef>& columns){
-  elog(DEBUG5, "PgGateAPI: PgGate_NewCreateIndex %s, %s, %s", database_name, schema_name, index_name);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 32",
-      .detail = ""
-  };
-
-  return status;
+    elog(DEBUG5, "PgGateAPI: PgGate_NewCreateIndex %s, %s, %s", database_name, schema_name, index_name);
+    auto [status, is_pg_catalog_table, schema] = makeSChema(schema_name, columns);
+    if (!status.ok()) {
+        return status;
+    }
+    const k2pg::PgObjectId index_object_id(database_oid, index_oid);
+    const k2pg::PgObjectId base_table_object_id(database_oid, table_oid);
+    return pg_gate->GetCatalogClient()->CreateIndexTable(database_name, index_name, index_object_id, base_table_object_id, schema, is_unique_index, skip_index_backfill, is_pg_catalog_table, false /* is_shared_table */, if_not_exist);
 }
 
 K2PgStatus PgGate_NewDropIndex(K2PgOid database_oid,
@@ -578,26 +460,12 @@ K2PgStatus PgGate_NewDropIndex(K2PgOid database_oid,
                             bool if_exist,
                             K2PgStatement *handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewDropIndex %d, %d", database_oid, index_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 33",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExecDropIndex(K2PgStatement handle){
   elog(DEBUG5, "PgGateAPI: PgGate_ExecDropIndex");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 34",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_WaitUntilIndexPermissionsAtLeast(
@@ -607,28 +475,14 @@ K2PgStatus PgGate_WaitUntilIndexPermissionsAtLeast(
     const uint32_t target_index_permissions,
     uint32_t *actual_index_permissions) {
   elog(DEBUG5, "PgGateAPI: PgGate_WaitUntilIndexPermissionsAtLeast %d, %d, %d", database_oid, table_oid, index_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 35",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AsyncUpdateIndexPermissions(
     const K2PgOid database_oid,
     const K2PgOid indexed_table_oid){
   elog(DEBUG5, "PgGateAPI: PgGate_AsyncUpdateIndexPermissions %d, %d", database_oid,  indexed_table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 36",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -640,14 +494,7 @@ K2PgStatus PgGate_AsyncUpdateIndexPermissions(
 // - INSERT / UPDATE / DELETE ... RETURNING target_expr1, target_expr2, ...
 K2PgStatus PgGate_DmlAppendTarget(K2PgStatement handle, K2PgExpr target){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlAppendTarget");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 37",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Binding Columns: Bind column with a value (expression) in a statement.
@@ -676,51 +523,23 @@ K2PgStatus PgGate_DmlAppendTarget(K2PgStatement handle, K2PgExpr target){
 //   the main-table, and therefore the bind-arguments are not associated with columns in main table.
 K2PgStatus PgGate_DmlBindColumn(K2PgStatement handle, int attr_num, K2PgExpr attr_value){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlBindColumn %d", attr_num);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 38",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_DmlBindRangeConds(K2PgStatement handle, K2PgExpr range_conds) {
   elog(DEBUG5, "PgGateAPI: PgGate_DmlBindRangeConds");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 39",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_DmlBindWhereConds(K2PgStatement handle, K2PgExpr where_conds) {
   elog(DEBUG5, "PgGateAPI: PgGate_DmlBindWhereConds");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 40",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Binding Tables: Bind the whole table in a statement.  Do not use with BindColumn.
 K2PgStatus PgGate_DmlBindTable(K2PgStatement handle){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlBindTable");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 41",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // API for SET clause.
@@ -728,14 +547,7 @@ K2PgStatus PgGate_DmlAssignColumn(K2PgStatement handle,
                                int attr_num,
                                K2PgExpr attr_value){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlAssignColumn %d", attr_num);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 42",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // This function is to fetch the targets in PgGate_DmlAppendTarget() from the rows that were defined
@@ -743,45 +555,51 @@ K2PgStatus PgGate_DmlAssignColumn(K2PgStatement handle,
 K2PgStatus PgGate_DmlFetch(K2PgScanHandle* handle, int32_t natts, uint64_t *values, bool *isnulls,
                         K2PgSysColumns *syscols, bool *has_data){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlFetch %d", natts);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 43",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Utility method that checks stmt type and calls either exec insert, update, or delete internally.
 K2PgStatus PgGate_DmlExecWriteOp(K2PgStatement handle, int32_t *rows_affected_count){
   elog(DEBUG5, "PgGateAPI: PgGate_DmlExecWriteOp");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 44",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // This function returns the tuple id (k2pgctid) of a Postgres tuple.
 K2PgStatus PgGate_DmlBuildPgTupleId(Oid db_oid, Oid table_id, const std::vector<K2PgAttributeDef>& attrs,
                                     uint64_t *k2pgctid){
-  elog(DEBUG5, "PgGateAPI: PgGate_DmlBuildPgTupleId %lu", attrs.size());
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 45",
-      .detail = ""
-  };
+    elog(DEBUG5, "PgGateAPI: PgGate_DmlBuildPgTupleId %lu", attrs.size());
 
-  return status;
+    skv::http::dto::SKVRecord record;
+    K2PgStatus status = makeSKVRecordFromK2PgAttributes(db_oid, table_id, attrs, record);
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    }
+
+
+    // TODO can we remove some of the copies being done?
+    skv::http::MPackWriter _writer;
+    skv::http::Binary serializedStorage;
+    _writer.write(record.getStorage());
+    bool flushResult = _writer.flush(serializedStorage);
+    if (!flushResult) {
+        K2PgStatus err {
+            .pg_code = ERRCODE_INTERNAL_ERROR,
+            .k2_code = 0,
+            .msg = "Serialization error in _writer flush",
+            .detail = ""
+        };
+        return err;
+    }
+
+    // This comes from cstring_to_text_with_len which is used to create a proper datum
+    // that is prepended with the data length. Doing it by hand here to avoid the extra copy
+    char *datum = (char*)palloc(serializedStorage.size() + VARHDRSZ);
+    SET_VARSIZE(datum, serializedStorage.size() + VARHDRSZ);
+    memcpy(VARDATA(datum), serializedStorage.data(), serializedStorage.size());
+    *k2pgctid = PointerGetDatum(datum);
+
+    return K2PgStatus::OK;
 }
-
-// DB Operations: WHERE(partially supported by K2-SKV)
-// TODO: ORDER_BY, GROUP_BY, etc.
 
 // INSERT ------------------------------------------------------------------------------------------
 
@@ -790,15 +608,28 @@ K2PgStatus PgGate_ExecInsert(K2PgOid database_oid,
                              bool upsert,
                              bool increment_catalog,
                              const std::vector<K2PgAttributeDef>& columns) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ExecInsert %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 46",
-      .detail = ""
-  };
+    elog(DEBUG5, "PgGateAPI: PgGate_ExecInsert %d, %d", database_oid, table_oid);
+    auto catalog = pg_gate->GetCatalogClient();
 
-  return status;
+    skv::http::dto::SKVRecord record;
+    K2PgStatus status = makeSKVRecordFromK2PgAttributes(database_oid, table_oid, columns, record);
+
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    }
+
+    auto txn = k2pg::TXMgr.GetTxn();
+    auto [k2status] = txn->write(record, false, upsert ? skv::http::dto::ExistencePrecondition::None : skv::http::dto::ExistencePrecondition::NotExists).get();
+    status = k2pg::K2StatusToK2PgStatus(std::move(k2status));
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    }
+
+    if (increment_catalog) {
+        status = catalog->IncrementCatalogVersion();
+    }
+
+    return status;
 }
 
 // UPDATE ------------------------------------------------------------------------------------------
@@ -807,15 +638,80 @@ K2PgStatus PgGate_ExecUpdate(K2PgOid database_oid,
                              bool increment_catalog,
                              int* rows_affected,
                              const std::vector<K2PgAttributeDef>& columns) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ExecUpdate %u, %u", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 47",
-      .detail = ""
-  };
+    elog(DEBUG5, "PgGateAPI: PgGate_ExecUpdate %u, %u", database_oid, table_oid);
 
-  return status;
+    auto catalog = pg_gate->GetCatalogClient();
+    *rows_affected = 0;
+    std::unique_ptr<skv::http::dto::SKVRecordBuilder> builder;
+
+    // Get a builder with the keys serialzed. called function handles tupleId attribute if needed
+    K2PgStatus status = makeSKVBuilderWithKeysSerialized(database_oid, table_oid, columns, builder);
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    }
+
+    // Iterate through the passed attributes to determine which fields should be marked for update
+    std::unordered_map<int, K2PgConstant> attr_map;
+    std::vector<uint32_t> fieldsForUpdate;
+    std::shared_ptr<k2pg::PgTableDesc> pg_table = k2pg::pg_session->LoadTable(database_oid, table_oid);
+    for (const auto& column : columns) {
+        k2pg::PgColumn *pg_column = pg_table->FindColumn(column.attr_num);
+        if (pg_column == NULL) {
+            K2PgStatus status {
+                .pg_code = ERRCODE_INTERNAL_ERROR,
+                .k2_code = 404,
+                .msg = "Cannot find column with attr_num",
+                .detail = "Load table failed"
+            };
+            return status;
+        }
+        // we have two extra fields, i.e., table_id and index_id, in skv key
+        fieldsForUpdate.push_back(pg_column->index() + 2);
+        attr_map[pg_column->index() + 2] = column.value;
+    }
+
+    // Serialize remaining non-key fields
+    try {
+        size_t offset = builder->getSchema()->partitionKeyFields.size();
+        for (size_t i = offset; i < builder->getSchema()->fields.size(); ++i) {
+            auto it = attr_map.find(i);
+            if (it == attr_map.end()) {
+                builder->serializeNull();
+            } else {
+                serializePGConstToK2SKV(*builder, it->second);
+            }
+        }
+    }
+    catch (const std::exception& err) {
+        K2PgStatus status {
+            .pg_code = ERRCODE_INTERNAL_ERROR,
+            .k2_code = 0,
+            .msg = "Serialization error in serializePgAttributesToSKV",
+            .detail = err.what()
+        };
+
+        return status;
+    }
+
+    // Send the partialUpdate request to SKV
+    auto txn = k2pg::TXMgr.GetTxn();
+    skv::http::dto::SKVRecord record = builder->build();
+    auto [k2status] = txn->partialUpdate(record, std::move(fieldsForUpdate)).get();
+    status = k2pg::K2StatusToK2PgStatus(std::move(k2status));
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    } else {
+        *rows_affected = 1;
+    }
+
+    if (increment_catalog) {
+        K2PgStatus catalog_status = catalog->IncrementCatalogVersion();
+        if (!catalog_status.IsOK()) {
+            return catalog_status;
+        }
+    }
+
+    return K2PgStatus::OK;
 }
 
 // DELETE ------------------------------------------------------------------------------------------
@@ -824,167 +720,117 @@ K2PgStatus PgGate_ExecDelete(K2PgOid database_oid,
                              bool increment_catalog,
                              int* rows_affected,
                              const std::vector<K2PgAttributeDef>& columns) {
-  elog(DEBUG5, "PgGateAPI: PgGate_ExecDelete %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 48",
-      .detail = ""
-  };
+    elog(DEBUG5, "PgGateAPI: PgGate_ExecDelete %d, %d", database_oid, table_oid);
 
-  return status;
+    auto catalog = pg_gate->GetCatalogClient();
+    *rows_affected = 0;
+    std::unique_ptr<skv::http::dto::SKVRecordBuilder> builder;
+
+    // Get a builder with the keys serialzed. called function handles tupleId attribute if needed
+    K2PgStatus status = makeSKVBuilderWithKeysSerialized(database_oid, table_oid, columns, builder);
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    }
+
+    // Serialize remaining non-key fields as null to create a valid SKVRecord
+    try {
+        size_t offset = builder->getSchema()->partitionKeyFields.size();
+        for (size_t i = offset; i < builder->getSchema()->fields.size(); ++i) {
+            builder->serializeNull();
+        }
+    }
+    catch (const std::exception& err) {
+        K2PgStatus status {
+            .pg_code = ERRCODE_INTERNAL_ERROR,
+            .k2_code = 0,
+            .msg = "Serialization error in serializePgAttributesToSKV",
+            .detail = err.what()
+        };
+
+        return status;
+    }
+
+    // Send the delete request to SKV
+    auto txn = k2pg::TXMgr.GetTxn();
+    skv::http::dto::SKVRecord record = builder->build();
+    auto [k2status] = txn->write(record, true, skv::http::dto::ExistencePrecondition::Exists).get();
+    status = k2pg::K2StatusToK2PgStatus(std::move(k2status));
+    if (status.pg_code != ERRCODE_SUCCESSFUL_COMPLETION) {
+        return status;
+    } else {
+        *rows_affected = 1;
+    }
+
+    if (increment_catalog) {
+        K2PgStatus catalog_status = catalog->IncrementCatalogVersion();
+        if (!catalog_status.IsOK()) {
+            return catalog_status;
+        }
+    }
+
+    return K2PgStatus::OK;
 }
 
 // SELECT ------------------------------------------------------------------------------------------
 K2PgStatus PgGate_NewSelect(K2PgOid database_oid,
                          K2PgOid table_oid,
-                         const K2PgPrepareParameters *prepare_params,
+                         const K2PgSelectIndexParams& index_params,
                          K2PgScanHandle **handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewSelect %d, %d", database_oid, table_oid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 49",
-      .detail = ""
-  };
-
-  return status;
-}
-
-// Set forward/backward scan direction.
-K2PgStatus PgGate_SetForwardScan(K2PgStatement handle, bool is_forward_scan){
-  elog(DEBUG5, "PgGateAPI: PgGate_SetForwardScan %d", is_forward_scan);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 50",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExecSelect(K2PgScanHandle *handle, const std::vector<K2PgConstraintDef>& constraints, const std::vector<int>& targets_attrnum,
-                             bool whole_table_scan, bool forward_scan, const K2PgExecParameters *exec_params) {
+                             bool whole_table_scan, bool forward_scan, const K2PgSelectLimitParams& limit_params) {
   elog(DEBUG5, "PgGateAPI: PgGate_ExecSelect");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 51",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Transaction control -----------------------------------------------------------------------------
 
 K2PgStatus PgGate_BeginTransaction(){
   elog(DEBUG5, "PgGateAPI: PgGate_BeginTransaction");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 52",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_RestartTransaction(){
   elog(DEBUG5, "PgGateAPI: PgGate_RestartTransaction");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 53",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_CommitTransaction(){
   elog(DEBUG5, "PgGateAPI: PgGate_CommitTransaction");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 54",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_AbortTransaction(){
   elog(DEBUG5, "PgGateAPI: PgGate_AbortTransaction");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 55",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_SetTransactionIsolationLevel(int isolation){
   elog(DEBUG5, "PgGateAPI: PgGate_SetTransactionIsolationLevel %d", isolation);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 56",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_SetTransactionReadOnly(bool read_only){
   elog(DEBUG5, "PgGateAPI: PgGate_SetTransactionReadOnly %d", read_only);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 57",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_SetTransactionDeferrable(bool deferrable){
   elog(DEBUG5, "PgGateAPI: PgGate_SetTransactionReadOnly %d", deferrable);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 58",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_EnterSeparateDdlTxnMode(){
   elog(DEBUG5, "PgGateAPI: PgGate_EnterSeparateDdlTxnMode");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 59",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_ExitSeparateDdlTxnMode(bool success){
   elog(DEBUG5, "PgGateAPI: PgGate_ExitSeparateDdlTxnMode");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 60",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -994,127 +840,57 @@ K2PgStatus PgGate_ExitSeparateDdlTxnMode(bool success){
 K2PgStatus PgGate_NewColumnRef(K2PgStatement stmt, int attr_num, const K2PgTypeEntity *type_entity,
                             const K2PgTypeAttrs *type_attrs, K2PgExpr *expr_handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewColumnRef %d", attr_num);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 61",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Constant expressions.
 K2PgStatus PgGate_NewConstant(K2PgStatement stmt, const K2PgTypeEntity *type_entity,
                            uint64_t datum, bool is_null, K2PgExpr *expr_handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewConstant %ld, %d", datum, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 62",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_NewConstantOp(K2PgStatement stmt, const K2PgTypeEntity *type_entity,
                            uint64_t datum, bool is_null, K2PgExpr *expr_handle, bool is_gt){
   elog(DEBUG5, "PgGateAPI: PgGate_NewConstantOp %lu, %d, %d", datum, is_null, is_gt);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 63",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // The following update functions only work for constants.
 // Overwriting the constant expression with new value.
 K2PgStatus PgGate_UpdateConstInt2(K2PgExpr expr, int16_t value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstInt2 %d, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 64",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstInt4(K2PgExpr expr, int32_t value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstInt4 %d, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 65",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstInt8(K2PgExpr expr, int64_t value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstInt8 %ld, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 66",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstFloat4(K2PgExpr expr, float value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstFloat4 %f, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 87",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstFloat8(K2PgExpr expr, double value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstFloat8 %f, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 68",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstText(K2PgExpr expr, const char *value, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstText %s, %d", value, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 69",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_UpdateConstChar(K2PgExpr expr, const char *value, int64_t bytes, bool is_null){
   elog(DEBUG5, "PgGateAPI: PgGate_UpdateConstChar %s, %ld, %d", value, bytes, is_null);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 70",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Expressions with operators "=", "+", "between", "in", ...
@@ -1122,26 +898,12 @@ K2PgStatus PgGate_NewOperator(K2PgStatement stmt, const char *opname,
                            const K2PgTypeEntity *type_entity,
                            K2PgExpr *op_handle){
   elog(DEBUG5, "PgGateAPI: PgGate_NewOperator %s", opname);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 71",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 K2PgStatus PgGate_OperatorAppendArg(K2PgExpr op_handle, K2PgExpr arg){
   elog(DEBUG5, "PgGateAPI: PgGate_OperatorAppendArg");
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 72",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Referential Integrity Check Caching.
@@ -1154,27 +916,13 @@ bool PgGate_ForeignKeyReferenceExists(K2PgOid table_oid, const char* k2pgctid, i
 // Add an entry to foreign key reference cache.
 K2PgStatus PgGate_CacheForeignKeyReference(K2PgOid table_oid, const char* k2pgctid, int64_t k2pgctid_size){
   elog(DEBUG5, "PgGateAPI: PgGate_CacheForeignKeyReference %d, %s, %ld", table_oid, k2pgctid, k2pgctid_size);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 73",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 // Delete an entry from foreign key reference cache.
 K2PgStatus PgGate_DeleteFromForeignKeyReferenceCache(K2PgOid table_oid, uint64_t k2pgctid){
   elog(DEBUG5, "PgGateAPI: PgGate_DeleteFromForeignKeyReferenceCache %d, %lu", table_oid, k2pgctid);
-  K2PgStatus status {
-      .pg_code = ERRCODE_FDW_OPERATION_NOT_SUPPORTED,
-      .k2_code = 501,
-      .msg = "Not implemented 74",
-      .detail = ""
-  };
-
-  return status;
+  return K2PgStatus::NotSupported;
 }
 
 void PgGate_ClearForeignKeyReferenceCache() {
@@ -1210,8 +958,7 @@ bool PgGate_GetDisableIndexBackfill() {
 }
 
 bool PgGate_IsK2PgEnabled() {
-//  return api_impl != nullptr;
-  return true;
+    return pg_gate != nullptr;
 }
 
 // Sets the specified timeout in the rpc service.
@@ -1272,9 +1019,8 @@ const void* PgGate_GetThreadLocalErrMsg() {
 }
 
 const K2PgTypeEntity *K2PgFindTypeEntity(int type_oid) {
-  elog(DEBUG5, "PgGateAPI: K2PgFindTypeEntity %d", type_oid);
-//  return api_impl->FindTypeEntity(type_oid);
-  return nullptr;
+    elog(DEBUG5, "PgGateAPI: K2PgFindTypeEntity %d", type_oid);
+    return pg_gate->FindTypeEntity(type_oid);
 }
 
 K2PgDataType K2PgGetType(const K2PgTypeEntity *type_entity) {
@@ -1305,20 +1051,8 @@ void K2PgAssignTransactionPriorityUpperBound(double newval, void* extra) {
 // TODO: check if we really need to implement them
 
 K2PgStatus PgGate_InitPgGateBackend() {
-  K2PgStatus status {
-      .pg_code = ERRCODE_SUCCESSFUL_COMPLETION,
-      .k2_code = 200,
-      .msg = "OK",
-      .detail = "InitPgGateBackend OK"
-  };
-
-  return status;
+  return K2PgStatus::OK;
 }
 
 void PgGate_ShutdownPgGateBackend() {
 }
-
-} // extern "C"
-
-}  // namespace gate
-}  // namespace k2pg
