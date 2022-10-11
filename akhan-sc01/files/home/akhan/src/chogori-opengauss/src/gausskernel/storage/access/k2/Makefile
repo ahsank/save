@@ -10,11 +10,13 @@ ifneq "$(MAKECMDGOALS)" "clean"
   endif
 endif
 
+exclude_option=-O2
+override CXXFLAGS := $(filter-out $(exclude_option),$(CXXFLAGS))
 override CXXFLAGS += -ggdb
 SUBDIRS     = catalog
 
-OBJS = k2pg-internal.o k2pg_util.o k2pg_aux.o pg_gate_thread_local.o pg_gate_api.o k2_expr.o k2_type.o k2catam.o k2cat_cmds.o \
-   k2_plan.o k2_table_ops.o k2_index_ops.o k2_bootstrap.o status.o session.o config.o pg_type.o pg_expr.o pg_ids.o pg_memctx.o \
+OBJS = k2pg-internal.o k2pg_util.o k2pg_aux.o pg_gate_thread_local.o pg_gate_api.o k2catam.o k2cat_cmds.o \
+   k2_plan.o k2_table_ops.o k2_index_ops.o k2_bootstrap.o status.o session.o config.o pg_ids.o pg_memctx.o \
    pg_schema.o pg_session.o pg_statement.o pg_tabledesc.o storage.o k2_util.o
 
 include $(top_srcdir)/src/gausskernel/common.mk
