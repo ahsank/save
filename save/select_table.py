@@ -7,15 +7,25 @@ from skvclient import (CollectionMetadata, CollectionCapacity, SKVClient,
 import logging
 from ast import literal_eval
 
-def query(coll, schema, txnarg = None):
+def query(coll=None, schema=None, table_oid=None, database=None, txnarg = None):
     if txnarg:
         txn = Txn(cl, literal_eval(txnarg))
     else:
         status, txn = cl.begin_txn()
         if not status.is2xxOK():
             raise Exception(status.message)
-    print(txn.timestamp)
+    if database:
+        coll = get_db_coll(database)
+        
+    if table_oid and database:
+        tables = get_tables(db_name=database)
+        table = [t for t in tables if int(t.data['TableOid']) == int(table_oid)]
+        if not table:
+            raise Exception(f"Table with oid {table_oid} not found")
+        schema = next(t for t in table).data['TableId'].decode()
+        
     status, query = txn.create_query(str.encode(coll), str.encode(schema))
+    
     if not status.is2xxOK():
         raise Exception(status.message)
     status, records = txn.queryAll(query)
@@ -39,22 +49,25 @@ def print_schema(schema):
             print(f'{k}:{v}')
                 
 def get_clusters():
-    return query("K2RESVD_COLLECTION_SQL_PRIMARY_CLUSTER", "K2RESVD_SCHEMA_SQL_CLUSTER_META")
+    return query(coll="K2RESVD_COLLECTION_SQL_PRIMARY_CLUSTER", schema="K2RESVD_SCHEMA_SQL_CLUSTER_META")
 
 def get_databases():
-    return query("K2RESVD_COLLECTION_SQL_PRIMARY_CLUSTER", "K2RESVD_SCHEMA_SQL_DATABASE_META")
+    return query(coll="K2RESVD_COLLECTION_SQL_PRIMARY_CLUSTER", schema="K2RESVD_SCHEMA_SQL_DATABASE_META")
 
-def get_tables(coll, db_name):
+def get_db_coll(db_name):
+    dbs = get_databases()
+    if dbs:
+        db = next(d for d in dbs if d.data['DatabaseName'] == str.encode(db_name))
+    else:
+        db = None
+    if db is None:
+        raise Exception(f"Database {db_name} not found")
+    return db.data['DatabaseId'].decode()
+    
+def get_tables(coll=None, db_name=None):
     if not coll and db_name:
-        dbs = get_databases()
-        if dbs:
-            db = next(d for d in dbs if d.data['DatabaseName'] == str.encode(db_name))
-        else:
-            db = None
-        if db is None:
-            raise Exception(f"Database {db_name} not found")
-        coll = db.data['DatabaseId'].decode()
-    return query(coll, "K2RESVD_SCHEMA_SQL_TABLE_META")
+        coll = get_db_coll(db_name)
+    return query(coll=coll, schema="K2RESVD_SCHEMA_SQL_TABLE_META")
 
 def print_records(records):
     for r in records:
@@ -67,12 +80,13 @@ if __name__ == '__main__':
     parser.add_argument("--coll", default="", help="Collection name")
     parser.add_argument("--schema", default="", help="Schema name")
     parser.add_argument("--db", default="template1", help="Database name")
+    parser.add_argument("--toid", help="Table oid")
     parser.add_argument("--txn")
     
     args = parser.parse_args()
     cl = SKVClient(args.http)
     if args.command == "query":
-        records = query(args.coll, args.schema, args.txn)
+        records = query(coll=args.coll, schema=args.schema, txnarg=args.txn, table_oid=args.toid, database=args.db)
         print_records(records)
     elif args.command == "get-schema":
         schema = get_schema(args.coll, args.schema)
