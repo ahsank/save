@@ -1,5 +1,5 @@
 diff --git a/src/bin/initdb/initdb.cpp b/src/bin/initdb/initdb.cpp
-index b784e714..7ec89340 100644
+index a94f53fa..bda85a2b 100644
 --- a/src/bin/initdb/initdb.cpp
 +++ b/src/bin/initdb/initdb.cpp
 @@ -4544,17 +4544,17 @@ int main(int argc, char* argv[])
