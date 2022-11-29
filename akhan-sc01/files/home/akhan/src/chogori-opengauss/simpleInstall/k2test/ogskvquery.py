@@ -42,11 +42,11 @@ class WrappedTxn:
         self.do_cleanup = False
     
     def __enter__(self):
-        # print(f"With txn {self.txn}")
         if not self.txn:
             status, self.txn = cl.begin_txn(TxnOptions(timeout=TimeDelta(seconds=60)))
             check_status(status)
             self.do_cleanup = True
+        # print(f"With txn {self.txn.timestamp}")
         return self
 
     def create_query(self, coll, schema):
@@ -71,7 +71,7 @@ class WrappedTxn:
                 # print(f"Aborting txn {self.txn}")
                 self.txn.end(False)
             else:
-                # print("Commiting txn {txn}")
+                # print(f"Commiting txn {self.txn}")
                 self.txn.end(True)
                 
 def query(coll, schema, txnarg = None):
@@ -173,9 +173,57 @@ def get_tables(coll=None, db_name=None):
         coll = get_db_coll(db_name)
     return query(coll=coll, schema="K2RESVD_SCHEMA_SQL_TABLE_META"), coll
 
-def print_records(records):
-    for r in records:
+import ast
+
+def print_records(records, filter):
+    
+    filtered = records
+    if filter:
+        for k, v in filter.items():
+            first = filtered[0] if filtered else None
+            if not first:
+                break
+            isbin = isinstance(first.data[k], (bytes, bytearray))
+            if isbin:
+                filtered = [ele for ele in filtered if ele.data[k] == ast.literal_eval("b'" + v + "'")]
+            else:
+                filtered = [ele for ele in filtered if str(ele.data[k]) == v]
+
+    for r in filtered:
         print(r.data)
+
+def get_txn(txnarg):
+    if not txnarg:
+        return None
+    times = txnarg.split(':')
+    if len(times) == 1:
+        return Txn(cl, [int(times[0]), 1000, 100000])
+    else:
+        d = int(times[0])
+        h = int(times[1])
+        min = int(times[2])
+        tmp = times[3].split('.')
+        sec = int(tmp[0])
+        msec = int(tmp[1])
+        usec = int(tmp[2])
+        print(f'{d}:{h}:{min}:{sec}.{msec}.{usec}')
+        val = (((((d*24+h)*60+min)*60)+sec)*1000 + msec)*1000+usec
+        return Txn(cl, [val, 1000, 10000])
+        
+class kvdictAppendAction(argparse.Action):
+    """
+    argparse action to split an argument into KEY=VALUE form
+    on the first = and append to a dictionary.
+    """
+    def __call__(self, parser, args, values, option_string=None):
+        assert(len(values) == 1)
+        try:
+            (k, v) = values[0].split("=", 2)
+        except ValueError as ex:
+            raise argparse.ArgumentError(self, f"could not parse argument \"{values[0]}\" as k=v format")
+        d = getattr(args, self.dest) or {}
+        d[k] = v
+        setattr(args, self.dest, d)    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -186,6 +234,11 @@ if __name__ == '__main__':
     parser.add_argument("--db", default="template1", help="Database name")
     parser.add_argument("--toid", help="Table oid")
     parser.add_argument("--table", help="Table name")
+    parser.add_argument("--filter",
+                      nargs=1,
+                      action=kvdictAppendAction,
+                      metavar="KEY=VALUE",
+                      help="Add key/value params. May appear multiple times.")
     parser.add_argument("--txn")
     
     args = parser.parse_args()
@@ -195,8 +248,8 @@ if __name__ == '__main__':
                         table_oid=args.toid, table_name=args.table,
                         database=args.db)
         records = query(coll=coll, schema=schema_name,
-                        txnarg=args.txn)
-        print_records(records)
+                        txnarg=get_txn(args.txn))
+        print_records(records, args.filter)
     elif args.command == "get-schema":
         coll, schema = get_schema(coll=args.coll, schema_name=args.schema,
                             table_oid=args.toid, table_name=args.table,
