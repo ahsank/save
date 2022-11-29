@@ -21,6 +21,7 @@ Copyright(c) 2022 Futurewei Cloud
     SOFTWARE.
 */
 
+#include <iomanip>
 #include "HTTPProxy.h"
 
 #include <seastar/core/sleep.hh>
@@ -59,20 +60,37 @@ std::string _serialize(dto::SKVRecord& k2rec) {
     return os.str();
 }
 
+struct HexStr {
+    const std::string& str;
+    HexStr(const std::string& val) : str(val) {}
+};
+
+std::ostream& operator<<(std::ostream& os, const HexStr& hs) {
+    for (size_t i=0; i < hs.str.length(); i++) {
+        if (isprint(hs.str[i])) {
+            os << hs.str[i];
+        } else {
+            os << "\\x" <<  std::setw(2) << std::setfill('0') << std::hex << (hs.str[i] & 0xff);
+        }
+    }
+    return os;
+}
+
 std::string _serialize(shd::SKVRecord& shdrec) {
     std::ostringstream os;
     uint32_t serializedCursor = shdrec.storage.serializedCursor;
     for (uint32_t field = 0; field < serializedCursor; ++field) {
         shdrec.visitNextField([&os](const auto& fld, auto&& value) {
             if (value) {
+                os << fld.name << "=";
                 using T = typename std::remove_reference_t<decltype(value)>::value_type;
                 if constexpr (std::is_same_v<T, shd::FieldType>) {
                     auto kval = static_cast<dto::FieldType>(to_integral(*value));
-                    os << fld.name << '=' << kval;
+                    os << kval;
                 } else if constexpr (std::is_same_v<T, sh::String>) {
-                    os << fld.name << '=' << *value;
+                    os << HexStr(*value);
                 } else {
-                    os << fld.name << '=' << *value;
+                    os << *value;
                 }
                 os << ", ";
             }
@@ -235,7 +253,10 @@ HTTPProxy::_handleTxnBegin(shd::TxnBeginRequest&& request){
 seastar::future<std::tuple<sh::Status, shd::WriteResponse>>
 HTTPProxy::_handleWrite(K2TxnHandle& txn, shd::WriteRequest&& request, dto::SKVRecord&& k2record) {
     return txn.write(k2record, request.isDelete, static_cast<dto::ExistencePrecondition>(request.precondition))
-        .then([](WriteResult&& result) {
+        .then([ts=txn.mtr().timestamp](WriteResult&& result) {
+            if (!result.status.is2xxOK()) {
+                K2LOG_D(log::httpproxy, "Write error ts={}, status={}", ts, result.status);
+            }
             return MakeHTTPResponse<shd::WriteResponse>(sh::Status{.code = result.status.code, .message = result.status.message}, shd::WriteResponse{});
         });
 }
@@ -309,14 +330,21 @@ HTTPProxy::_handleRead(shd::ReadRequest&& request) {
                 dto::SKVRecord k2record(request.collectionName, k2Schema);
                 shd::SKVRecord shdrecord(request.collectionName, shdSchema, std::move(request.key), true);
                 try {
+                    K2LOG_D(log::httpproxy, "Read detail ts={} read=[{}]", it->second.handle.mtr().timestamp, _serialize(shdrecord));
+
                     _shdRecToK2(shdrecord, k2record);
                 }  catch(shd::DeserializationError& err) {
                     return MakeHTTPResponse<shd::ReadResponse>(sh::Statuses::S400_Bad_Request(err.what()), shd::ReadResponse{});
-                }
+                }  catch(std::exception& err) {
+                K2LOG_E(log::httpproxy, "Exception {}", err);
+                return MakeHTTPResponse<shd::ReadResponse>(sh::Statuses::S400_Bad_Request(err.what()), shd::ReadResponse{});
+                
+            }
 
                 return it->second.handle.read(std::move(k2record))
-                    .then([&request, shdSchema, k2Schema](auto&& result) {
+                    .then([&request, shdSchema, k2Schema, ts=it->second.handle.mtr().timestamp](auto&& result) {
                         if (!result.status.is2xxOK()) {
+                            K2LOG_D(log::httpproxy, "Read error ts={}, status={}", ts, result.status);
                             return MakeHTTPResponse<shd::ReadResponse>(sh::Status{.code = result.status.code, .message = result.status.message}, shd::ReadResponse{});
                         }
                         auto rec = _buildSHDRecord(result.value, request.collectionName, shdSchema);
@@ -333,7 +361,7 @@ HTTPProxy::_handleRead(shd::ReadRequest&& request) {
 
 seastar::future<std::tuple<sh::Status, shd::QueryResponse>>
 HTTPProxy::_handleQuery(shd::QueryRequest&& request) {
-    K2LOG_D(log::httpproxy, "Received query request {}", request);
+    K2LOG_D(log::httpproxy, "Received query request txn={} queryId={}", request.timestamp, request.queryId);
     auto iter = _txns.find(request.timestamp);
     if (iter == _txns.end()) {
         return MakeHTTPResponse<shd::QueryResponse>(Txn_S410_Gone, shd::QueryResponse{});
