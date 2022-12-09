@@ -1,8 +1,8 @@
 diff --git a/test/integration/test_http_client.sh b/test/integration/test_http_client.sh
-index 3e350e5..3d5e32f 100755
+index c7da3f7..3d5e32f 100755
 --- a/test/integration/test_http_client.sh
 +++ b/test/integration/test_http_client.sh
-@@ -1,59 +1,114 @@
+@@ -1,60 +1,114 @@
  #!/bin/bash
  set -e
  topname=$(dirname "$0")
@@ -11,7 +11,7 @@ index 3e350e5..3d5e32f 100755
  cd ${topname}/../..
  
 -# start CPO
--./build/src/k2/cmd/controlPlaneOracle/cpo_main ${COMMON_ARGS} -c1 --tcp_endpoints ${CPO} 9001 --data_dir ${CPODIR} --prometheus_port 63000 --assignment_timeout=1s --txn_heartbeat_deadline=1s --nodepool_endpoints ${EPS[@]} --tso_endpoints ${TSO} --tso_error_bound=100us --persistence_endpoints ${PERSISTENCE}&
+-./build/src/k2/cmd/controlPlaneOracle/cpo_main ${COMMON_ARGS} -c1 --tcp_endpoints ${CPO} 9001 --data_dir ${CPODIR} --prometheus_port 63000 --assignment_timeout=3s --txn_heartbeat_deadline=1s --nodepool_endpoints ${EPS[@]} --tso_endpoints ${TSO} --tso_error_bound=100us --persistence_endpoints ${PERSISTENCE}&
 -cpo_child_pid=$!
 +runhttp=true
 +runnode=true
@@ -76,7 +76,8 @@ index 3e350e5..3d5e32f 100755
 +    ./build/src/k2/cmd/nodepool/nodepool ${COMMON_ARGS} -c${#EPS[@]} --tcp_endpoints ${EPS[@]} --k23si_persistence_endpoint ${PERSISTENCE} --prometheus_port 63001 --memory=1G --partition_request_timeout=6s --log_level=Info &
 +    nodepool_child_pid=$!
  
--./build/src/k2/cmd/httpproxy/http_proxy ${COMMON_ARGS} -c1 --tcp_endpoints ${HTTP} --memory=1G --cpo ${CPO} --httpproxy_txn_timeout=100ms --httpproxy_expiry_timer_interval=50ms&
+-# start http proxy with increased cpo request timeout as delete collection takes more time
+-./build/src/k2/cmd/httpproxy/http_proxy ${COMMON_ARGS} -c1 --tcp_endpoints ${HTTP} --memory=1G --cpo ${CPO} --httpproxy_txn_timeout=100ms --httpproxy_expiry_timer_interval=50ms --cpo_request_timeout=6s&
 -http_child_pid=$!
 +    # start persistence
 +    ./build/src/k2/cmd/persistence/persistence ${COMMON_ARGS} -c1 --tcp_endpoints ${PERSISTENCE} --prometheus_port 63002 &
