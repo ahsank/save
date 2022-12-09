@@ -1,5 +1,5 @@
 diff --git a/src/k2/httpproxy/HTTPProxy.cpp b/src/k2/httpproxy/HTTPProxy.cpp
-index 061158a..cdd6df4 100644
+index 061158a..9603d6c 100644
 --- a/src/k2/httpproxy/HTTPProxy.cpp
 +++ b/src/k2/httpproxy/HTTPProxy.cpp
 @@ -21,6 +21,7 @@ Copyright(c) 2022 Futurewei Cloud
@@ -80,6 +80,15 @@ index 061158a..cdd6df4 100644
  void _shdRecToK2(shd::SKVRecord& shdrec, dto::SKVRecord& k2rec) {
      uint32_t serializedCursor = shdrec.storage.serializedCursor;
      for (uint32_t field = 0; field < serializedCursor; ++field) {
+@@ -172,7 +236,7 @@ HTTPProxy::_handleTxnBegin(shd::TxnBeginRequest&& request){
+     };
+     return _client.beginTxn(std::move(opts))
+         .then([this](auto&& txn) {
+-            K2LOG_D(log::httpproxy, "begin txn: {}", txn.mtr());
++            K2LOG_D(log::httpproxy, "begin txn: ts={}", txn.mtr().timestamp);
+             auto ts = txn.mtr().timestamp;
+             shd::Timestamp shts{.endCount = ts.endCount, .tsoId = ts.tsoId, .startDelta = ts.startDelta};
+             if (auto it = _txns.find(shts); it != _txns.end()) {
 @@ -189,7 +253,10 @@ HTTPProxy::_handleTxnBegin(shd::TxnBeginRequest&& request){
  seastar::future<std::tuple<sh::Status, shd::WriteResponse>>
  HTTPProxy::_handleWrite(K2TxnHandle& txn, shd::WriteRequest&& request, dto::SKVRecord&& k2record) {
@@ -151,7 +160,15 @@ index 061158a..cdd6df4 100644
      return iter->second.handle.query(queryIter->second)
      .then([this, request=std::move(request)](QueryResult&& result) {
          if(!result.status.is2xxOK()) {
-@@ -391,10 +470,11 @@ HTTPProxy::_handleGetSchema(shd::GetSchemaRequest&& request) {
+@@ -368,6 +447,7 @@ HTTPProxy::_handleTxnEnd(shd::TxnEndRequest&& request) {
+     if (it == _txns.end()) {
+         return MakeHTTPResponse<shd::TxnEndResponse>(Txn_S410_Gone, shd::TxnEndResponse{});
+     }
++    K2LOG_D(log::httpproxy, "end txn: ts={}", it->second.handle.mtr().timestamp);
+     return it->second.handle.end(request.action == shd::EndAction::Commit)
+         .then([this, timestamp=request.timestamp] (auto&& result) {
+             if (result.status.is2xxOK() || result.status.is4xxNonRetryable()) {
+@@ -391,10 +471,11 @@ HTTPProxy::_handleGetSchema(shd::GetSchemaRequest&& request) {
      });
  }
  
@@ -164,7 +181,7 @@ index 061158a..cdd6df4 100644
  }
  
  namespace k2exp = dto::expression;
-@@ -431,20 +511,28 @@ k2exp::Expression getFilterExpression(shdexp::Expression&& shExpr) {
+@@ -431,20 +512,28 @@ k2exp::Expression getFilterExpression(shdexp::Expression&& shExpr) {
  seastar::future<std::tuple<sh::Status, shd::CreateQueryResponse>>
  HTTPProxy::_handleCreateQuery(shd::CreateQueryRequest&& request) {
      K2LOG_D(log::httpproxy, "Received create query request {}", request);
@@ -197,7 +214,7 @@ index 061158a..cdd6df4 100644
                  result.query.setLimit(req.recordLimit);
                  result.query.setIncludeVersionMismatch(req.includeVersionMismatch);
                  result.query.setReverseDirection(req.reverseDirection);
-@@ -465,6 +553,7 @@ HTTPProxy::_handleCreateQuery(shd::CreateQueryRequest&& request) {
+@@ -465,6 +554,7 @@ HTTPProxy::_handleCreateQuery(shd::CreateQueryRequest&& request) {
                  return MakeHTTPResponse<shd::CreateQueryResponse>(Txn_S410_Gone, shd::CreateQueryResponse{});
              } else {
                  updateExpiry(it->second);
@@ -205,3 +222,21 @@ index 061158a..cdd6df4 100644
                  it->second.queries[queryId] = std::move(result.query);
                  return MakeHTTPResponse<shd::CreateQueryResponse>(
                      sh::Status{.code = result.status.code, .message = result.status.message},
+@@ -517,7 +607,7 @@ seastar::future<> HTTPProxy::gracefulStop() {
+     std::vector<seastar::future<>> futs;
+     futs.push_back(_expiryList.stop());
+     for (auto& [ts, txn]: _txns) {
+-        futs.push_back(txn.handle.kill());
++        futs.push_back(txn.handle.end(false).discard_result());
+     }
+     return seastar::when_all_succeed(futs.begin(), futs.end()).discard_result()
+     .then([this] {
+@@ -535,7 +625,7 @@ seastar::future<> HTTPProxy::start() {
+         auto ts = txn.timestamp;
+         K2LOG_W(log::httpproxy, "Removing txn {} because of timeout", ts);
+         auto node = _txns.extract(ts); // No need to unlink from list, as it's done by caller
+-        return node ?  node.mapped().handle.kill() : seastar::make_ready_future<>();
++        return node ?  node.mapped().handle.end(false).discard_result() : seastar::make_ready_future<>();
+     });
+     return _client.start();
+ }
