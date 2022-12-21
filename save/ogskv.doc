@@ -1,0 +1,62 @@
+MYPROJECT -*- mode: org -*-
+
+* Changes
+
+** General changes
+
+1.  
+2. =simple_heap_delete= to =CatalogTupleDelete=
+3. 
+
+
+** Configure
+
+#+begin_src
+-std=gnu++17
+#end_src
+
+*** aclchk.cpp
+
+- c1 
+
+*** builtin_funcs.ini
+
+AddFuncGroup
+
+| Funtion name      | Attr |   |
+|-------------------+------+---|
+| k2inbuild         |      |   |
+| k2inbuildempty    |      |   |
+| k2ininsert        |      |   |
+| k2inbeginscan     |      |   |
+| k2inendscan       |      |   |
+| k2inrescan        |      |   |
+| k2ingettuple      |      |   |
+| k2inbulkdelete    |      |   |
+| k2incanreturn     |      |   |
+| k2inoptions       |      |   |
+| k2incostestimate  |      |   |
+| k2invacuumcleanup |      |   |
+
+*** =dependency.cpp=
+
+- c1
+
+#+BEGIN_SRC c++
+void doDeletion(obj) {
+   /* Deletes single object */
+   /* IsK2PgRelationById(object->objectId) before index_drop or heap_drop_with_catalog */
+   if (relKind == RELKIND_INDEX || relKind == RELKIND_GLOBAL_INDEX) {
+     Relation index = RelationIdGetRelation(object->objectId);
+     if (!index->rd_index->indisprimary) {
+       K2PgDropIndex(object->objectId);
+	   RelationClose(index);
+     }
+   } else {
+      K2PgDropTable(object->objectId);
+   }
+}
+#+END_SRC
+
+*** =genbki.pl= 
+

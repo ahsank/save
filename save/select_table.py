@@ -7,7 +7,7 @@ from skvclient import (CollectionMetadata, CollectionCapacity, SKVClient,
 import logging
 from ast import literal_eval
 
-def query(coll=None, schema=None, table_oid=None, database=None, txnarg = None):
+def query(coll=None, schema=None, table_oid=None, table_name=None, database=None, txnarg = None):
     if txnarg:
         txn = Txn(cl, literal_eval(txnarg))
     else:
@@ -17,9 +17,12 @@ def query(coll=None, schema=None, table_oid=None, database=None, txnarg = None):
     if database:
         coll = get_db_coll(database)
         
-    if table_oid and database:
+    if database and not schema:
         tables = get_tables(db_name=database)
-        table = [t for t in tables if int(t.data['TableOid']) == int(table_oid)]
+        if table_oid:
+            table = [t for t in tables if int(t.data['TableOid']) == int(table_oid)]
+        elif table_name:
+            table = [t for t in tables if t.data['TableName'].decode() == table_name]
         if not table:
             raise Exception(f"Table with oid {table_oid} not found")
         schema = next(t for t in table).data['TableId'].decode()
@@ -81,12 +84,15 @@ if __name__ == '__main__':
     parser.add_argument("--schema", default="", help="Schema name")
     parser.add_argument("--db", default="template1", help="Database name")
     parser.add_argument("--toid", help="Table oid")
+    parser.add_argument("--table", help="Table name")
     parser.add_argument("--txn")
     
     args = parser.parse_args()
     cl = SKVClient(args.http)
     if args.command == "query":
-        records = query(coll=args.coll, schema=args.schema, txnarg=args.txn, table_oid=args.toid, database=args.db)
+        records = query(coll=args.coll, schema=args.schema,
+                        txnarg=args.txn, table_oid=args.toid, table_name=args.table,
+                        database=args.db)
         print_records(records)
     elif args.command == "get-schema":
         schema = get_schema(args.coll, args.schema)
