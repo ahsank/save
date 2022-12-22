@@ -6,7 +6,7 @@ MYPROJECT -*- mode: org -*-
 
 1. =simple_heap_delete= to =CatalogTupleDelete=
 2. =simple_heap_insert= to =CatalogTupleInsert=
-3. 
+3. ==FirstLowInvalidHeapAttributeNumber== by ==K2PgGetFirstLowInvalidAttributeNumber(relinfo->ri_RelationDesc)==
 
 ** Configure
 
@@ -216,10 +216,17 @@ Code with c1 or c2 only
 10. ==src/common/backend/catalog/pg_range.cpp b/src/common/backend/catalog/pg_range.cpp==
 11. ==src/common/backend/catalog/pg_shdepend.cpp b/src/common/backend/catalog/pg_shdepend.cpp==
 12. ==src/common/backend/catalog/pg_type.cpp b/src/common/backend/catalog/pg_type.cpp==
+13. ==src/gausskernel/optimizer/commands/comment.cpp==
+14. ==src/gausskernel/optimizer/commands/extension.cpp==
+15. ==src/gausskernel/optimizer/commands/opclasscmds.cpp==
+16. ==src/gausskernel/optimizer/commands/opclasscmds.cpp==
+17. ==src/gausskernel/optimizer/commands/opclasscmds.cpp==
+18. ==src/gausskernel/optimizer/commands/trigger.cpp==
+19. ==src/gausskernel/optimizer/commands/typecmds.cpp==
+20. ==src/gausskernel/optimizer/commands/user.cpp==
 
- 
 #+BEGIN_SRC c
-// c1 and/or c2
+// c1 and/or c2 or c3
 #+END_SRC
 
 #+NAME: /src/common/backend/catalog/pg_proc.cpp
@@ -1707,7 +1714,807 @@ void K2PgPreloadRelCache()
 }
 #+END_SRC
 
-#+NAME:
+#+NAME: src/common/backend/utils/cache/relmapper.cpp
 #+BEGIN_SRC c
+// Skip following
+void RelationMapInvalidate(bool shared);
+void RelationMapInvalidateAll(void);
+void RelationMapInitializePhase2(void);
+void RelationMapInitializePhase3(void);
+void perform_relmap_update(bool shared, const RelMapFile* updates);
+#+END_SRC
 
+#+NAME: src/common/backend/utils/cache/syscache.cpp
+#+BEGIN_SRC c
+Bitmapset *
+K2PgSysTablePrimaryKey(Oid relid)
+{
+	Bitmapset *pkey = NULL;
+
+#define K2PgPkAddAttribute(attid) \
+	do { pkey = bms_add_member(pkey, attid - FirstLowInvalidHeapAttributeNumber); } while (false)
+
+	switch (relid)
+	{
+		case AccessMethodOperatorRelationId:
+		case AccessMethodProcedureRelationId:
+		case AccessMethodRelationId:
+		case AggregateRelationId:
+		case AttrDefaultRelationId:
+		case AuthIdRelationId:
+		case CastRelationId:
+		case CollationRelationId:
+		case ConstraintRelationId:
+		case ConversionRelationId:
+		case DatabaseRelationId:
+		case DefaultAclRelationId:
+		case EnumRelationId:
+		case ForeignDataWrapperRelationId:
+		case ForeignServerRelationId:
+		case ForeignTableRelationId:
+		case LanguageRelationId:
+		case NamespaceRelationId:
+		case OperatorClassRelationId:
+		case OperatorFamilyRelationId:
+		case OperatorRelationId:
+		case ProcedureRelationId:
+		case RelationRelationId:
+		case RewriteRelationId:
+		case StatisticExtRelationId:
+		case TSConfigRelationId:
+		case TSDictionaryRelationId:
+		case TSParserRelationId:
+		case TSTemplateRelationId:
+		case TableSpaceRelationId:
+		case TypeRelationId:
+		case UserMappingRelationId:
+			K2PgPkAddAttribute(ObjectIdAttributeNumber);
+			break;
+		case AttributeRelationId:
+			K2PgPkAddAttribute(Anum_pg_attribute_attrelid);
+			K2PgPkAddAttribute(Anum_pg_attribute_attnum);
+			break;
+		case AuthMemRelationId:
+			K2PgPkAddAttribute(Anum_pg_auth_members_roleid);
+			K2PgPkAddAttribute(Anum_pg_auth_members_member);
+			break;
+		case IndexRelationId:
+			K2PgPkAddAttribute(Anum_pg_index_indexrelid);
+			break;
+		case RangeRelationId:
+			K2PgPkAddAttribute(Anum_pg_range_rngtypid);
+			break;
+		case StatisticRelationId:
+			K2PgPkAddAttribute(Anum_pg_statistic_starelid);
+			break;
+		case TSConfigMapRelationId:
+			K2PgPkAddAttribute(Anum_pg_ts_config_map_mapcfg);
+			K2PgPkAddAttribute(Anum_pg_ts_config_map_maptokentype);
+			K2PgPkAddAttribute(Anum_pg_ts_config_map_mapseqno);
+			break;
+		default: break;
+	}
+
+#undef K2PgPkAddAttribute
+
+	return pkey;
+}
+
+/*
+ * Utility function for K2PG mode. Is used to automatically add entries
+ * from common catalog tables to the cache immediately after they are inserted.
+ */
+void K2PgSetSysCacheTuple(Relation rel, HeapTuple tup)
+{
+	TupleDesc tupdesc = RelationGetDescr(rel);
+	switch (RelationGetRelid(rel))
+	{
+		case RelationRelationId:
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[RELOID], tup, tupdesc);
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[RELNAMENSP], tup, tupdesc);
+			break;
+		case TypeRelationId:
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[TYPEOID], tup, tupdesc);
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[TYPENAMENSP], tup, tupdesc);
+			break;
+		case ProcedureRelationId:
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[PROCOID], tup, tupdesc);
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[PROCNAMEARGSNSP], tup, tupdesc);
+			break;
+		case AttributeRelationId:
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[ATTNUM], tup, tupdesc);
+			SetCatCacheTuple(u_sess->syscache_cxt.SysCache[ATTNAME], tup, tupdesc);
+			break;
+
+		default:
+			/* For non-critical tables/indexes nothing to do */
+			return;
+	}
+}
+
+/*
+ * In K2PG mode preload the given cache with data from master.
+ * If no index cache is associated with the given cache (most of the time), its id should be -1.
+ */
+void
+K2PgPreloadCatalogCache(int cache_id, int idx_cache_id)
+{
+
+	CatCache* cache         = u_sess->syscache_cxt.SysCache[cache_id];
+	CatCache* idx_cache     = idx_cache_id != -1 ? u_sess->syscache_cxt.SysCache[idx_cache_id] : NULL;
+	List*     current_list  = NIL;
+	List*     list_of_lists = NIL;
+	HeapTuple ntp;
+	Relation  relation      = heap_open(cache->cc_reloid, AccessShareLock);
+	TupleDesc tupdesc       = RelationGetDescr(relation);
+
+	SysScanDesc scandesc = systable_beginscan(relation,
+	                                          cache->cc_indexoid,
+	                                          false /* indexOK */,
+	                                          NULL /* snapshot */,
+	                                          0  /* nkeys */,
+	                                          NULL /* key */);
+
+	while (HeapTupleIsValid(ntp = systable_getnext(scandesc)))
+	{
+		SetCatCacheTuple(cache, ntp, RelationGetDescr(relation));
+		if (idx_cache)
+			SetCatCacheTuple(idx_cache, ntp, RelationGetDescr(relation));
+
+		/*
+		 * Special handling for the common case of looking up
+		 * functions (procedures) by name (i.e. partial key).
+		 * We set up the partial cache list for function by-name
+		 * lookup on initialization to avoid scanning the large
+		 * pg_proc table each time.
+		 */
+		if (cache_id == PROCOID)
+		{
+			ListCell *lc;
+			bool     found_match = false;
+			bool     is_null     = false;
+			ScanKeyData key      = idx_cache->cc_skey[0];
+
+			Datum ndt = heap_getattr(ntp, key.sk_attno, tupdesc, &is_null);
+
+			if (is_null)
+			{
+				elog(WARNING,"Ignoring unexpected null "
+				                "entry while initializing proc "
+				                "cache list");
+				continue;
+			}
+
+			char *fname          = NameStr(*DatumGetName(ndt));
+			char *internal_fname = TextDatumGetCString(heap_getattr(ntp,
+			                                                        Anum_pg_proc_prosrc,
+			                                                        tupdesc,
+			                                                        &is_null));
+
+			/*
+			 * The internal name must be unique so if this is the
+			 * same as the function name, then this must be the only
+			 * or at least first occurrence of this function name.
+			 * TODO this assumption holds for standard procs (i.e.
+			 * initdb) but we should clean this up when enabling
+			 * CREATE PROCEDURE.
+			 */
+			bool is_canonical = strcmp(fname, internal_fname) == 0;
+
+			if (!is_canonical)
+			{
+				/*
+				 * Look for an existing list for functions with
+				 * this name.
+				 */
+				foreach(lc, list_of_lists)
+				{
+					List      *fnlist = (List *)lfirst(lc);
+					HeapTuple otp     = (HeapTuple) linitial(fnlist);
+					Datum     odt     = heap_getattr(otp,
+					                                 key.sk_attno,
+					                                 tupdesc,
+					                                 &is_null);
+
+					Datum test = FunctionCall2Coll(&key.sk_func,
+					                               key.sk_collation,
+					                               ndt,
+					                               odt);
+					found_match = DatumGetBool(test);
+					if (found_match)
+					{
+						fnlist = lappend(fnlist, ntp);
+						lc->data.ptr_value = fnlist;
+						break;
+					}
+				}
+			}
+			if (!found_match)
+			{
+				List *new_list = lappend(NIL, ntp);
+				list_of_lists = lappend(list_of_lists, new_list);
+			}
+		}
+
+		/*
+		 * Special handling for pg_rewrite: preload rules list by relation oid.
+		 * Note that rules should be ordered by name - which is achieved using
+		 * RewriteRelRulenameIndexId index.
+		 */
+		if (cache_id == RULERELNAME)
+		{
+			if (!current_list)
+			{
+				current_list = list_make1(ntp);
+			}
+			else
+			{
+				HeapTuple       ltp        = (HeapTuple) llast(current_list);
+				Form_pg_rewrite ltp_struct = (Form_pg_rewrite) GETSTRUCT(ltp);
+				Form_pg_rewrite ntp_struct = (Form_pg_rewrite) GETSTRUCT(ntp);
+				if (ntp_struct->ev_class == ltp_struct->ev_class)
+				{
+					// This rule is for the same table as the last one, continuing the list
+					current_list  = lappend(current_list, ntp);
+				}
+				else
+				{
+					// This rule is for another table, changing current list
+					list_of_lists = lappend(list_of_lists, current_list);
+					current_list  = list_make1(ntp);
+				}
+			}
+		}
+	}
+
+	if (current_list)
+	{
+		list_of_lists = lappend(list_of_lists, current_list);
+	}
+
+	systable_endscan(scandesc);
+
+	heap_close(relation, AccessShareLock);
+
+	/* Load up the lists computed above - if any - into the catalog cache. */
+	ListCell *lc;
+	foreach (lc, list_of_lists)
+	{
+		List *current_list = (List *) lfirst(lc);
+		if (cache_id == PROCOID)
+		{
+			SetCatCacheList(idx_cache, 1, current_list);
+		}
+		if (cache_id == RULERELNAME)
+		{
+			SetCatCacheList(cache, 1, current_list);
+		}
+	}
+	list_free_deep(list_of_lists);
+}
+
+/*
+ * In K2PG mode load up the caches with data from some essential tables
+ * that are looked up often during regular usage.
+ *
+ * Used during initdb.
+ */
+static void
+K2PgPreloadCatalogCacheIfEssential(int cache_id)
+{
+	int idx_cache_id = -1;
+
+	switch (cache_id)
+	{
+		case RELOID:
+			idx_cache_id = RELNAMENSP;
+			break;
+		case TYPEOID:
+			idx_cache_id = TYPENAMENSP;
+			break;
+		case ATTNAME:
+			idx_cache_id = ATTNUM;
+			break;
+		case PROCOID:
+			idx_cache_id = PROCNAMEARGSNSP;
+			break;
+		case OPEROID:
+			idx_cache_id = OPERNAMENSP;
+			break;
+		case CASTSOURCETARGET:
+			/* No index cache */
+			break;
+		default:
+			/* non-essential table -- nothing to do */
+			return;
+	}
+
+	K2PgPreloadCatalogCache(cache_id, idx_cache_id);
+}
+
+/*
+ * Preload catalog caches with data from the master to avoid master lookups
+ * later.
+ *
+ * Used during initdb.
+ */
+void
+K2PgPreloadCatalogCaches(void)
+{
+	int			cacheId;
+
+	Assert(CacheInitialized);
+
+	/* Ensure individual caches are initialized */
+	InitCatalogCachePhase2();
+
+	for (cacheId = 0; cacheId < SysCacheSize; cacheId++)
+		K2PgPreloadCatalogCacheIfEssential(cacheId);
+}
+
+#+END_SRC
+
+#+NAME: src/common/backend/utils/error/be_module.cpp
+#+BEGIN_SRC c
+const module_data module_map[] = {{MOD_K2, "K2"},}
+#+END_SRC
+
+#+NAME: src/common/backend/utils/error/elog.cpp
+#+BEGIN_SRC c
+if (++t_thrd.log_cxt.errordata_stack_depth >= ERRORDATA_STACK_SIZE && elevel >= ERROR );
+#+END_SRC
+
+#+NAME: /src/common/backend/utils/fmgr/fmgr.cpp
+#+BEGIN_SRC c
+static PGFunction load_plpgsql_function(char* funcname) {
+ if (!strcmp(funcname, "k2_fdw_validator")) {
+        retval = &k2_fdw_validator;
+    } else if (!strcmp(funcname, "k2_fdw_handler")) {
+        retval = &k2_fdw_handler;
+ }
+}
+
+static void fmgr_info_C_lang(Oid functionId, FmgrInfo* finfo, HeapTuple procedure, ...) {
+ strcmp(probinstring,  "$libdir/k2_fdw") &&
+}
+#+END_SRC
+
+#+NAME: src/common/backend/utils/init/globals.cpp
+#+BEGIN_SRC c
+const uint32 GRAND_VERSION_NUM = 92421; // probably no change
+#+END_SRC
+
+#+NAME: src/common/backend/utils/init/postinit.cpp
+#+BEGIN_SRC c
+// Call K2PgInitSession in some fns
+// Skip 
+ void PostgresInitializer::SetDatabasePath() 
+#+END_SRC
+
+#+NAME: src/common/backend/utils/mmgr/mcxt.cpp
+#+BEGIN_SRC c
+MemoryContext GetThreadLocalCurrentMemoryContext()
+{
+	return (MemoryContext) PgGate_GetThreadLocalCurrentMemoryContext();
+}
+
+MemoryContext SetThreadLocalCurrentMemoryContext(MemoryContext memctx)
+{
+	return (MemoryContext) PgGate_SetThreadLocalCurrentMemoryContext(memctx);
+}
+
+void PrepareThreadLocalCurrentMemoryContext()
+{
+	if (PgGate_GetThreadLocalCurrentMemoryContext() == NULL)
+	{
+		MemoryContext memctx = AllocSetContextCreate((MemoryContext) NULL,
+		                                             "K2PGExprMemoryContext",
+		                                             ALLOCSET_SMALL_SIZES);
+		PgGate_SetThreadLocalCurrentMemoryContext(memctx);
+	}
+}
+
+void ResetThreadLocalCurrentMemoryContext()
+{
+	MemoryContext memctx = (MemoryContext) PgGate_GetThreadLocalCurrentMemoryContext();
+	PgGate_ResetCurrentMemCtxThreadLocalVars();
+	MemoryContextReset(memctx);
+}
+
+*
+ * You should not do memory allocations within a critical section, because
+ * an out-of-memory error will be escalated to a PANIC. To enforce that
+ * rule, the allocation functions Assert that.
+ */
+#define AssertNotInCriticalSection(context) \
+	Assert(CritSectionCount == 0 || (context)->allowInCritSection)
+
+void MemoryContextReset(MemoryContext context) {
+	/*
+	 * Reset K2PG context also.
+	 */
+	if (context->k2pg_memctx != NULL) {
+		HandleK2PgStatus(PgGate_ResetMemctx(context->k2pg_memctx));
+	}
+}
+
+void MemoryContextDelete(MemoryContext context) {
+	/*
+	 * Destroy K2PG memory context.
+	 */
+    if (context->k2pg_memctx != NULL) {
+	    HandleK2PgStatus(PgGate_DestroyMemctx(context->k2pg_memctx));
+	    context->k2pg_memctx = NULL;
+    }
+}
+
+void *palloc(Size size)
+{
+	/* duplicates MemoryContextAlloc to avoid increased overhead */
+	void	   *ret;
+	MemoryContext context = GetCurrentMemoryContext();
+
+	AssertArg(MemoryContextIsValid(context));
+	AssertNotInCriticalSection(context);
+
+	if (!AllocSizeIsValid(size))
+		elog(ERROR, "invalid memory alloc request size %zu", size);
+
+	context->isReset = false;
+
+	ret = context->methods->alloc(context, 0, size, __FILE__, __LINE__);
+	if (unlikely(ret == NULL))
+	{
+		MemoryContextStats(TopMemoryContext);
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory"),
+				 errdetail("Failed on request of size %zu in memory context \"%s\".",
+						   size, context->name)));
+	}
+
+//	VALGRIND_MEMPOOL_ALLOC(context, ret, size);
+
+	return ret;
+}
+
+/*
+ * Get the K2PG current memory context.
+ */
+K2PgMemctx GetCurrentK2Memctx() {
+	MemoryContext context = GetCurrentMemoryContext();
+	AssertArg(MemoryContextIsValid(context));
+	AssertNotInCriticalSection(context);
+
+	if (context->k2pg_memctx == NULL) {
+		// Create the K2PG context if this is the first time it is used.
+		context->k2pg_memctx = PgGate_CreateMemctx();
+	}
+
+	return context->k2pg_memctx;
+}
+
+#+END_SRC
+
+#+NAME: src/common/pl/plpgsql/src/pl_exec.cpp
+#+BEGIN_SRC c
+// Set tmptup.t_k2pgctid = (Datum) 0; in following fns
+Datum plpgsql_exec_function(PLpgSQL_function* func, FunctionCallInfo fcinfo, bool, ...);
+void exec_assign_value(PLpgSQL_execstate* estate, PLpgSQL_datum* target, Datum, ...);
+void exec_assign_value(PLpgSQL_execstate* estate, PLpgSQL_datum* target, Datum, ...);
+#+END_SRC
+
+#+NAME: src/gausskernel/bootstrap/bootparse.y
+#+BEGIN_SRC y
+%token XDECLARE K2DECLARE INDEX ON USING XBUILD INDICES PRIMARY UNIQUE XTOAST // K2 & PRIMARY
+%token K2PGCHECKINITDBDONE
+Boot_Query :
+ | Boot_CheckInitDbDone
+Boot_K2Index:
+          /* EMPTY */ { $$ = NULL; }
+          | K2DECLARE PRIMARY INDEX boot_ident oidspec ON boot_ident USING boot_ident
+            LPAREN boot_index_params RPAREN
+				{
+					IndexStmt *stmt = makeNode(IndexStmt);
+
+					do_start();
+
+					stmt->idxname = $4;
+					stmt->relation = makeRangeVar(NULL, $7, -1);
+					stmt->accessMethod = $9;
+					stmt->tableSpace = NULL;
+					stmt->indexParams = $11;
+					stmt->options = NIL;
+					stmt->whereClause = NULL;
+					stmt->excludeOpNames = NIL;
+					stmt->idxcomment = NULL;
+					stmt->indexOid = $5;
+					stmt->oldNode = InvalidOid;
+					stmt->unique = true;
+					stmt->primary = true;
+					stmt->isconstraint = false;
+					stmt->deferrable = false;
+					stmt->initdeferred = false;
+					stmt->concurrent = false;
+
+					do_end();
+
+					$$ = stmt;
+				}
+Boot_CreateStmt:
+  RPAREN Boot_K2Index {
+
+					if (IsK2PgEnabled())
+					{
+						K2PgCreateSysCatalogTable($2, $3, tupdesc, shared_relation, $13);
+					}
+  }
+Boot_CheckInitDbDone:
+      	  K2PGCHECKINITDBDONE
+      			{
+					if (K2PgIsInitDbAlreadyDone())
+						exit(K2PG_INITDB_ALREADY_DONE_EXIT_CODE);
+				}
+		;
+#+END_SRC
+
+#+NAME: src/gausskernel/bootstrap/bootscanner.l
+#+BEGIN_SRC l
+"k2pg_declare"	{ return(K2DECLARE); } /* For K2PG pkeys */
+"k2pg_check_if_initdb_is_already_done" { return(K2PGCHECKINITDBDONE);}
+#+END_SRC
+
+#+NAME: src/gausskernel/bootstrap/bootstrap.cpp
+#+BEGIN_SRC c
+void BootStrapProcessMain(int argc, char* argv[]) {
+            /* Connect to K2PG cluster. */
+            K2PgInitPostgresBackend("postgres");
+            K2PgInitSession("template1");
+ 
+  if (IsK2PgEnabled() && !IsK2PgLocalNodeInitdbMode())
+    {
+        K2InitPGCluster();
+
+
+        K2PgCreateDatabase(TemplateDbOid,
+                          "template1",
+                          InvalidOid,
+                          FirstBootstrapObjectId);
+
+        K2PgCommitTxn();
+    }
+	/* We do not use a relation map file in K2PG mode yet */
+	if (!IsK2PgEnabled())
+	{
+        /*
+        * We should now know about all mapped relations, so it's okay to write
+        * out the initial relation mapping files.
+        */
+        RelationMapFinishBootstrap();
+    }
+
+  if (IsK2PgEnabled() && !IsK2PgLocalNodeInitdbMode())
+    {
+        // set initDbDone to be true on K2 SKV
+        K2FinishInitDB();
+
+        K2PgCommitTxn();
+    }
+}
+
+// also c2
+#+END_SRC
+
+== K2PgInitPostgresBackend(Job name);== and possibly == K2PgInitPostgresBackend("ActiveSessionCollectMain");== in followings
+
+1. ==src/gausskernel/cbb/instruments/ash/ash.cpp==
+2. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
+3. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
+4. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
+5. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
+6. 
+
+#+NAME: src/gausskernel/optimizer/commands/constraint.cpp
+#+BEGIN_SRC c
+Datum unique_key_recheck(PG_FUNCTION_ARGS) {
+        ItemPointer t_self = IsK2PgRelation(fakeIdxRel) ? (ItemPointer)(new_row->t_k2pgctid) : &(new_row->t_self);
+        index_insert(fakeIdxRel, values, isnull, t_self, fakeRel, UNIQUE_CHECK_EXISTING);
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/copy.cpp
+#+BEGIN_SRC c
+static uint64 CopyFrom(CopyState cstate) {
+if (IsK2PgRelation(cstate->rel)
+  useHeapMultiInsert = false;  
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/createas.cpp
+#+BEGIN_SRC c
+static void intorel_receive(TupleTableSlot* slot, DestReceiver* self) {
+  if (IsK2PgRelation(myState->rel))
+    K2PgExecuteInsert(myState->rel, RelationGetDescr(myState->rel), tuple);
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/dbcommands.cpp
+#+BEGIN_SRC c
+// also c1
+void createdb(const CreatedbStmt* stmt) {
+  if (dbname != NULL && (strcmp(dbname, "template0") == 0 || strcmp(dbname, "template1") == 0)) {
+        K2PgSetPreparingTemplates();
+    }
+	if (IsK2PgEnabled())
+		K2PgCreateDatabase(dboid, dbname, src_dboid, InvalidOid);
+}
+void dropdb(const char* dbname, bool missing_ok) {
+	if (IsK2PgEnabled())
+	{
+		K2PgDropDatabase(db_id, dbname);
+	}
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/indexcmds.cpp
+#+BEGIN_SRC c
+Oid DefineIndex(Oid relationId, IndexStmt* stmt, Oid indexRelationId, bool, ...) {
+	/* Use fast path create index when in nested DDL.  This is desired
+	 * when there would be no concurrency issues (e.g. `CREATE TABLE
+	 * ... (... UNIQUE (...))`).  However, there may be cases where it
+	 * is unsafe to use the fast path.  For now, just use the fast path
+	 * in all cases.
+	 */
+	if (stmt->concurrent && K2PgGetDdlNestingLevel() != 1)
+		stmt->concurrent = false;
+
+	/*
+	 * Backfilling unique indexes is currently not supported.  This is desired
+	 * when there would be no concurrency issues (e.g. `CREATE TABLE ... (...
+	 * UNIQUE (...))`).  However, it is not desired in cases where there could
+	 * be concurrency issues (e.g. `CREATE UNIQUE INDEX ...`, `ALTER TABLE ...
+	 * ADD UNIQUE (...)`).  For now, just use the fast path in all cases.
+	 */
+	if (stmt->concurrent && stmt->unique)
+		stmt->concurrent = false;
+
+	/*
+	 * In K2PG mode, switch index method from "btree" or "hash" to "lsm" depending on whether
+	 * the table is stored in K2PG storage or not (such as temporary tables).
+	 */
+	if (IsK2PgEnabled())
+	{
+		if (accessMethodName == NULL)
+		{
+			accessMethodName = const_cast<char*>(IsK2PgRelation(rel) ? DEFAULT_K2PG_INDEX_TYPE : DEFAULT_INDEX_TYPE);
+		}
+		else if (IsK2PgRelation(rel))
+		{
+			if (strcmp(accessMethodName, "btree") == 0 || strcmp(accessMethodName, "hash") == 0)
+			{
+				ereport(NOTICE,
+						(errmsg("index method \"%s\" was replaced with \"%s\" in K2PG",
+								accessMethodName, DEFAULT_K2PG_INDEX_TYPE)));
+				accessMethodName = DEFAULT_K2PG_INDEX_TYPE;
+			}
+		}
+	}
+    if (IsK2PgRelation(rel) && accessMethodId != K2INDEX_AM_OID)
+      ereport(ERROR,
+				(errmsg("index method \"%s\" not supported yet",
+						accessMethodName),
+				 errhint(" ")));
+    K2PgDecrementDdlNestingLevel(true /* success */);
+	K2PgIncrementDdlNestingLevel();
+    // TODO: need to add index permission API calls once we support that ?
+}
+void ComputeIndexAttrs(IndexInfo* indexInfo, Oid* typeOidP, Oid* collationOidP, ...) {
+  /*
+     * Get whether the index will use K2PG ordering
+     */
+    if (IsK2PgEnabled() &&
+        !IsBootstrapProcessingMode() &&
+        !K2PgIsPreparingTemplates()) {
+        Relation rel = RelationIdGetRelation(relId);
+        use_k2pg_ordering = IsK2PgRelation(rel) && !IsSystemRelation(rel);
+        RelationClose(rel);
+    }
+        if (IsK2PgEnabled()) {
+            if (use_k2pg_ordering) {
+                switch (attribute->ordering) {
+                    case SORTBY_ASC:
+                    case SORTBY_DESC:
+                        range_index = true;
+                        break;
+                    case SORTBY_DEFAULT:
+                        /*
+                         * In K2PG mode, first attribute defaults to HASH and
+                         * other attributes default to ASC.
+                         */
+                        if (attn > 0) {
+                            range_index = true;
+                            break;
+                        }
+                        if (range_index)
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                                     errmsg("hash column not allowed after an ASC/DESC column")));
+                        break;
+                    default:
+                        ereport(ERROR,
+                                (errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+                                 errmsg("unsupported column sort order")));
+                        break;
+                }
+            }
+        }
+
+   if (amcanorder) {
+            /* default ordering is ASC */
+            /*
+             * In K2PG, use HASH as the default for the first column of
+             * non-colocated tables
+             */
+            if (use_k2pg_ordering &&
+                attn == 0 &&
+                attribute->ordering == SORTBY_DEFAULT)
+                colOptionP[attn] |= INDOPTION_HASH;
+
+            /* default ordering is ASC
+            * TODO
+            * We do not support DESC index (see chogori-sql issue #268),
+            * so commenting this out forces PG to see the index as ascending and sort if necessary
+            * This can be uncommented if the issue is resolved.
+            if (attribute->ordering == SORTBY_DESC)
+                colOptionP[attn] = ((uint16)colOptionP[attn]) | INDOPTION_DESC;
+            */
+   }
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/matview.cpp
+#+BEGIN_SRC c
+ItemPointer t_self = IsK2PgRelation(mapIdx) ? (ItemPointer)(tup->t_k2pgctid) : &(tup->t_self);
+// in
+void insert_into_matview_map(Oid mapid, Oid matid, ItemPointer matctid, ...);
+void insert_into_mlog_table(Relation rel, Oid mlogid, HeapTuple tuple, ItemPoint, ...);
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/tablecmds.cpp
+#+BEGIN_SRC c
+Oid DefineRelation(CreateStmt* stmt, char relkind, Oid ownerId, bool isCTAS) {
+               CheckIsK2PgSupportedRelationByKind(relkind);
+               K2PgCreateTable(stmt, relkind, relisshared, descriptor, relationId, namespaceId);}
+void renameatt(RenameStmt* stmt) {K2PgRename(stmt, relid);}
+void RenameRelation(RenameStmt* stmt) {K2PgRename(stmt, relid);}
+void AlterTable(Oid relid, LOCKMODE lockmode, AlterTableStmt* stmt) {
+//-        ATController(rel, stmt->cmds, interpretInhOption(stmt->relation->inhOpt), lockmode);
+//+        ATController(stmt, rel, stmt->cmds, interpretInhOption(stmt->relation->inhOpt), lockmode);
+
+}
+static void ATController(AlterTableStmt* stmt, Relation rel, List* cmds, bool recurse, LOCKMODE lockmode) {
+  Oid relid = RelationGetRelid(rel);
+       /*
+        * Prepare the K2PG alter statement handle -- need to call this before the
+        * system catalogs are changed below (since it looks up table metadata).
+        */
+       K2PgStatement handle = NULL;
+       if (IsK2PgRelation(rel))
+       {
+               handle = K2PgPrepareAlterTable(stmt, rel, relid);
+       }
+	/*
+	 * Execute the K2PG alter table (if needed).
+	 * Must call this after syscatalog updates succeed (e.g. dependencies are
+	 * checked) since we do not support rollback of K2PG alter operations yet.
+	 */
+	if (handle)
+	{
+		K2PgExecAlterPgTable(handle, relid);
+	}
+}
+// Remove  bool isDeltaTable
+static AlteredTableInfo* ATGetQueueEntry(List** wqueue, Relation rel) {
+}
+// also c1, c2
 #+END_SRC
