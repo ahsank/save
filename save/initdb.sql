@@ -131,5 +131,35 @@ create table client2 (c_id INT NOT NULL PRIMARY KEY, c_name VARCHAR(100) NOT NUL
 INSERT INTO client2(c_id,c_name,c_phone) VALUES (1,'zhangyi','18815650001');
 INSERT INTO client2(c_id,c_name,c_phone)  VALUES (2, 'zhanger','18815650002');
 
+INSERT INTO client3(c_id,c_name,c_phone) VALUES (1,'zhangyi9','18015750001');
+
 select c_name from client2 where c_id=1;
-de
+
+create table client4 (c_id INT NOT NULL, c_name VARCHAR(100) NOT NULL, c_phone CHAR(20) NOT NULL);
+
+create index ix_name on client4 (c_name);
+
+INSERT INTO client4(c_id,c_name,c_phone) VALUES (1,'zhangyi','18815650001');
+INSERT INTO client4(c_id,c_name,c_phone)  VALUES (2, 'zhanger','18815650002');
+
+select c_phone from client4 where c_name = 'zhanger';
+
+b PgGate_NewSelect if table_oid == 20760
+explain analyze select c_phone from client4 where c_name = 'zhanger';
+explain (verbose) select c_phone from client4 where c_name = 'zhanger';
+
+b set_plain_rel_pathlist
+b create_index_paths
+b get_ndex_paths
+b build_index_paths
+b match_clause_to_index
+b match_clause_to_indexcol
+op_in_opfamily
+b indexpath.cpp:2378
+
+create table client7 (c_id INT NOT NULL PRIMARY KEY, c_name VARCHAR(100) NOT NULL, c_phone CHAR(20) UNIQUE NOT NULL);
+
+INSERT INTO client7(c_id,c_name,c_phone) VALUES (1,'zhangyi','18815650001');
+INSERT INTO client7(c_id,c_name,c_phone)  VALUES (2, 'zhanger','18815650002');
+
+select * from client7 where c_id=1;

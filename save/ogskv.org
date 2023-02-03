@@ -1,24 +1,16 @@
 MYPROJECT -*- mode: org -*-
 
-* Changes
 
-** General changes
 
-1. =simple_heap_delete= to =CatalogTupleDelete=
-2. =simple_heap_insert= to =CatalogTupleInsert=
-3. ==FirstLowInvalidHeapAttributeNumber== by ==K2PgGetFirstLowInvalidAttributeNumber(relinfo->ri_RelationDesc)==
-
-** Configure
 
 #+begin_src
 -std=gnu++17
 #end_src
 
-*** aclchk.cpp
 
 - c1 
 
-*** builtin_funcs.ini
+builtin_funcs.ini
 
 AddFuncGroup
 
@@ -224,6 +216,12 @@ Code with c1 or c2 only
 18. ==src/gausskernel/optimizer/commands/trigger.cpp==
 19. ==src/gausskernel/optimizer/commands/typecmds.cpp==
 20. ==src/gausskernel/optimizer/commands/user.cpp==
+21. ==src/gausskernel/optimizer/commands/trigger.cpp==
+22. ==src/gausskernel/optimizer/commands/typecmds.cpp==
+23. ==src/gausskernel/optimizer/commands/user.cpp==
+24. ==src/gausskernel/optimizer/rewrite/rewriteRemove.cpp==
+25. ==src/gausskernel/optimizer/util/plancat.cpp==
+26. ==src/gausskernel/runtime/executor/functions.cpp==
 
 #+BEGIN_SRC c
 // c1 and/or c2 or c3
@@ -2312,7 +2310,11 @@ void BootStrapProcessMain(int argc, char* argv[]) {
 3. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
 4. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
 5. == K2PgInitPostgresBackend("ActiveSessionCollectMain");==
-6. 
+6. ==src/gausskernel/process/job/job_scheduler.cpp==
+7. ==src/gausskernel/process/postmaster/autovacuum.cpp==
+8. ==/src/gausskernel/process/postmaster/checkpointer.cpp==, skip.
+9. ==src/gausskernel/storage/access/ustore/knl_undolauncher.cpp==
+
 
 #+NAME: src/gausskernel/optimizer/commands/constraint.cpp
 #+BEGIN_SRC c
@@ -2483,8 +2485,9 @@ void insert_into_mlog_table(Relation rel, Oid mlogid, HeapTuple tuple, ItemPoint
 #+NAME: src/gausskernel/optimizer/commands/tablecmds.cpp
 #+BEGIN_SRC c
 Oid DefineRelation(CreateStmt* stmt, char relkind, Oid ownerId, bool isCTAS) {
-               CheckIsK2PgSupportedRelationByKind(relkind);
-               K2PgCreateTable(stmt, relkind, relisshared, descriptor, relationId, namespaceId);}
+  CheckIsK2PgSupportedRelationByKind(relkind);
+  K2PgCreateTable(stmt, relkind, relisshared, descriptor, relationId, namespaceId);
+}
 void renameatt(RenameStmt* stmt) {K2PgRename(stmt, relid);}
 void RenameRelation(RenameStmt* stmt) {K2PgRename(stmt, relid);}
 void AlterTable(Oid relid, LOCKMODE lockmode, AlterTableStmt* stmt) {
@@ -2494,27 +2497,1491 @@ void AlterTable(Oid relid, LOCKMODE lockmode, AlterTableStmt* stmt) {
 }
 static void ATController(AlterTableStmt* stmt, Relation rel, List* cmds, bool recurse, LOCKMODE lockmode) {
   Oid relid = RelationGetRelid(rel);
-       /*
-        * Prepare the K2PG alter statement handle -- need to call this before the
-        * system catalogs are changed below (since it looks up table metadata).
-        */
-       K2PgStatement handle = NULL;
-       if (IsK2PgRelation(rel))
-       {
-               handle = K2PgPrepareAlterTable(stmt, rel, relid);
-       }
-	/*
-	 * Execute the K2PG alter table (if needed).
-	 * Must call this after syscatalog updates succeed (e.g. dependencies are
-	 * checked) since we do not support rollback of K2PG alter operations yet.
-	 */
-	if (handle)
-	{
-		K2PgExecAlterPgTable(handle, relid);
-	}
+  /*
+   * Prepare the K2PG alter statement handle -- need to call this before the
+   * system catalogs are changed below (since it looks up table metadata).
+   */
+   K2PgStatement handle = NULL;
+   if (IsK2PgRelation(rel)) {handle = K2PgPrepareAlterTable(stmt, rel, relid);}
+   /*
+   * Execute the K2PG alter table (if needed).
+   * Must call this after syscatalog updates succeed (e.g. dependencies are
+   * checked) since we do not support rollback of K2PG alter operations yet.
+   */
+   if (handle) {K2PgExecAlterPgTable(handle, relid);}
 }
+
 // Remove  bool isDeltaTable
 static AlteredTableInfo* ATGetQueueEntry(List** wqueue, Relation rel) {
 }
 // also c1, c2
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/commands/trigger.cpp
+#+BEGIN_SRC c
+ltrmark:
+  tuple.t_k2pgctid = (Datum) 0;
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/path/allpaths.cpp
+#+BEGIN_SRC c
+RelOptInfo* make_one_rel(PlannerInfo* root, List* joinlist)  {
+  if (IsK2PgEnabled()) {
+    for (rti = 1; rti < root->simple_rel_array_size; rti) {
+      RelOptInfo *relation = root->simple_rel_array[rti];
+
+      if (relation != NULL && relation->rtekind == RTE_RELATION) {
+        RangeTblEntry *rte = root->simple_rte_array[rti];
+        if (IsK2PgRelationById(rte->relid)) {
+          // Set the K2PG FDW routine because we will use the foreign scan API below.
+          relation->fdwroutine = (FdwRoutine*)k2_fdw_handler(NULL);
+        }
+      }
+    }
+  }
+}
+void set_rel_size(PlannerInfo* root, RelOptInfo* rel, Index rti, RangeTblEntry*, ...) {
+  if (IsK2PgRelationById(rte->relid)) set_foreign_size(root, rel, rte);
+}
+
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/plan/createplan.cpp
+#+BEGIN_SRC c
+ModifyTable* make_modifytable(CmdType operation, bool canSetTag, List* resultRel, ...) {
+  // TODO: add logic to populate k2PushdownTlist if it is useful
+  node->k2PushdownTlist = NULL;
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/rewrite/rewriteHandler.cpp
+#+BEGIN_SRC c
+static void rewriteTargetListUD(Query* parsetree, RangeTblEntry* target_rte, ...) {
+  if (IsK2PgRelation(target_relation))
+  {
+    /*
+    * If there are secondary indices on the target table, or if we have a
+    * row-level trigger corresponding to the operations, then also return
+    * the whole row.
+    */
+    if (K2PgRelHasOldRowTriggers(target_relation, parsetree->commandType) ||
+    K2PgRelHasSecondaryIndices(target_relation))
+    {
+      var = makeWholeRowVar(target_rte, parsetree->resultRelation, 0, false);
+      attrname = "wholerow";
+    }
+ 
+    /*
+    * Emit k2pgctid so that executor can find the row to update or delete from K2PG tables.
+    */
+    var = makeVar(parsetree->resultRelation, K2PgTupleIdAttributeNumber, BYTEAOID, -1, InvalidOid, 0);
+    attrname = "k2pgctid";
+  }
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/optimizer/util/plancat.cpp
+#+BEGIN_SRC c
+void get_relation_info(PlannerInfo* root, Oid relationObjectId, bool inhparent, ...) {
+  if (IsK2PgRelation(relation) && (((unsigned int)opt) & INDOPTION_HASH) != 0) {
+    info->reverse_sort[i] = false;
+    info->nulls_first[i] = false;
+  }
+  // Skip distributed relation code PGXC for IsK2PgRelation(indexRelation)
+}
+
+void estimate_rel_size(Relation rel, int32* attr_widths, RelPageType* pages, ...) {
+  /*
+  * We don't support forwarding k2 size estimates to postgres yet.
+  * Use whatever is in pg_class.
+  */
+  if (IsK2PgEnabled())
+  {
+    *pages = rel->rd_rel->relpages;
+    *tuples = rel->rd_rel->reltuples;
+    *allvisfrac = 0;
+    return;
+  }
+
+}
+
+
+#+END_SRC
+
+#+NAME: src/gausskernel/process/postmaster/postmaster.cpp
+#+BEGIN_SRC c
+int PostmasterMain(int argc, char* argv[]) {
+  while ((opt = getopt_r(..., "...:K") != -1) {
+    case 'K':
+      k2_mode_enabled = true;
+      break;
+  }
+  if (k2_mode_enabled || K2PgIsEnabledInPostgresEnvVar()) {
+    g_instance.k2_cxt.isK2ModelEnabled = true;
+    u_sess->k2_cxt.isK2ModelEnabled = true;
+    ereport(LOG, (errmsg("K2_Mode is ENABLED in PostgreSQL.")));
+  } else {
+    g_instance.k2_cxt.isK2ModelEnabled = false;
+    u_sess->k2_cxt.isK2ModelEnabled = false;
+    ereport(LOG, (errmsg("K2_Mode is NOT ENABLED in PostgreSQL.")));
+  }
+  // Comment g_instance.pid_cxt.ReaperBackendPID = initialize_util_thread(REAPER);
+  // if k2 enabled skip
+  //   g_instance.pid_cxt.CheckpointerPID = initialize_util_thread(CHECKPOINT_THREAD);
+  //   g_instance.pid_cxt.AutoVacPID = initialize_util_thread(AUTOVACUUM_LAUNCHER);
+  //   g_instance.pid_cxt.PgJobSchdPID = initialize_util_thread(JOB_SCHEDULER);
+  // Bunch of other jobs commented
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/process/postmaster/twophasecleaner.cpp
+#+BEGIN_SRC c
+// connect_timeout from 5 to 60
+#+END_SRC
+
+#+NAME: src/gausskernel/process/tcop/postgres.cpp
+#+BEGIN_SRC c
+void quickdie(SIGNAL_ARGS) {
+  if (IsK2PgEnabled()) {K2PgOnPostgresBackendShutdown();}
+}
+
+int PostgresMain(int argc, char* argv[], const char* dbname, const char* username) {
+  for (int i = 0; i < argc; i++) {
+    if (strcmp(argv[i], "template0") == 0 || strcmp(argv[i], "template1") == 0) {
+      K2PgSetPreparingTemplates();
+    }
+  }
+  if (dbname) {
+    if (strcmp(dbname, "template0") == 0 || strcmp(dbname, "template1") == 0) {
+      K2PgSetPreparingTemplates();
+    }
+    } else if (username) {
+        if (strcmp(username, "template0") == 0 || strcmp(username, "template1") == 0) {
+            K2PgSetPreparingTemplates();
+        }
+    }
+    /* Connect to K2PG cluster. */
+    K2PgInitPostgresBackend("PostgresMain");
+    K2PgInitSession(dbname);
+    if (IsK2PgEnabled() && k2pg_need_cache_refresh)
+    {
+      K2PgRefreshCache();
+    }
+
+    if (IsK2PgEnabled()) {
+      K2PgCheckSharedCatalogCacheVersion();
+    }
+    // Add  PG_TRY(); around exec_simple_query
+
+    PG_TRY();
+    {
+      exec_simple_query(query_string, QUERY_MESSAGE, &input_message); 
+/* @hdfs Add the second parameter */
+    }
+    PG_CATCH();
+    {
+      bool need_retry = false;
+      MemoryContext oldcontext = GetCurrentMemoryContext();
+      K2PgPrepareCacheRefreshIfNeeded(oldcontext,
+      k2pg_check_retry_allowed(query_string),
+      &need_retry);
+      if (need_retry) {
+        elog(WARNING, "Retry query is not supported yet for query: %s", query_string);
+      }
+      PG_RE_THROW();
+    }
+    PG_END_TRY();
+                
+
+    PG_TRY();
+    {
+      statement_init_metric_context();
+      exec_parse_message(query_string, stmt_name, paramTypes, paramTypeNames, numParams);
+      statement_commit_metirc_context();
+    }
+    PG_CATCH();
+    {
+      /*
+      * Cannot retry parse statements yet and have to abort the followup bind/execute.
+      */
+      bool need_retry = false;
+      MemoryContext oldcontext = GetCurrentMemoryContext();
+      K2PgPrepareCacheRefreshIfNeeded(oldcontext,
+        false /* consider_retry */,
+        &need_retry);
+        PG_RE_THROW();
+      }
+      PG_END_TRY();
+ 
+
+      PG_TRY();
+      {
+        exec_execute_message(portal_name, max_rows);
+      }
+      PG_CATCH();
+      {
+      bool can_retry = IsK2PgEnabled() &&
+        u_sess->pcache_cxt.unnamed_stmt_psrc &&
+        k2pg_check_retry_allowed(u_sess->pcache_cxt.unnamed_stmt_psrc->query_string);
+
+        bool need_retry = false;
+        MemoryContext oldcontext = GetCurrentMemoryContext();
+        K2PgPrepareCacheRefreshIfNeeded(oldcontext,
+          can_retry,
+          &need_retry);
+          if (need_retry) {
+          elog(WARNING, "Retry execution is not supported yet for %s", portal_name);
+          }
+          PG_RE_THROW();
+          }
+        PG_END_TRY();
+
+}
+
+#+END_SRC
+
+#+NAME: postgress.cpp 2
+#+BEGIN_SRC c
+/*
+ * Reload the postgres caches and update the cache version.
+ * Note: if catalog changes sneaked in since getting the
+ * version it is unfortunate but ok. The master version will have
+ * changed too (making our version number obsolete) so we will just end
+ * up needing to do another cache refresh later.
+ * See the comment for k2pg_catalog_cache_version in 'pg_k2pg_utils.c' for
+ * more details.
+ */
+static void K2PgRefreshCache()
+{
+
+       /*
+        * Check that we are not already inside a transaction or we might end up
+        * leaking cache references for any open relations (i.e. relations in-use by
+        * the current transaction).
+        *
+        * Caller(s) should have already ensured that this is the case.
+        */
+       if (t_thrd.postgres_cxt.xact_started)
+       {
+               ereport(ERROR,
+                       (errcode(ERRCODE_INTERNAL_ERROR),
+                                       errmsg("Cannot refresh cache within a transaction")));
+       }
+
+    elog(INFO, "K2Pg refreshing cache ...");
+
+
+       /* Get the latest syscatalog version from the master */
+       uint64_t catalog_master_version = 0;
+       PgGate_GetCatalogMasterVersion(&catalog_master_version);
+
+       /* Need to execute some (read) queries internally so start a local txn. */
+       start_xact_command();
+
+       /* Clear and reload system catalog caches, including all callbacks. */
+       ResetCatalogCaches();
+       CallSystemCacheCallbacks();
+       K2PgPreloadRelCache();
+
+       /* Also invalidate the pggate cache. */
+       PgGate_InvalidateCache();
+
+       /* Set the new ysql cache version. */
+       k2pg_catalog_cache_version = catalog_master_version;
+       k2pg_need_cache_refresh = false;
+
+       finish_xact_command();
+}
+
+static void K2PgPrepareCacheRefreshIfNeeded(MemoryContext oldcontext,
+                                          bool consider_retry,
+                                          bool *need_retry)
+{
+       bool            need_global_cache_refresh = false;
+       bool            need_table_cache_refresh = false;
+       char       *table_to_refresh = NULL;
+       const char *table_cache_refresh_search_str = "schema version mismatch for table ";
+
+       *need_retry = false;
+
+       /*
+        * A retry is only required if the transaction is handled by K2PG.
+        */
+       if (!IsK2PgEnabled() || t_thrd.log_cxt.errordata_stack_depth < 0)
+               return;
+
+    elog(DEBUG5, "K2PgPrepareCacheRefreshIfNeeded is called");
+
+       /* Get error data */
+       ErrorData *edata = NULL;
+       MemoryContextSwitchTo(oldcontext);
+       edata = CopyErrorData();
+
+       bool is_retryable_err = K2PgNeedRetryAfterCacheRefresh(edata);
+       if ((table_to_refresh = strstr(edata->message,
+                                                                  table_cache_refresh_search_str)) != NULL)
+
+       {
+               size_t size_of_uuid = 16; /* boost::uuids::uuid::static_size() */
+               size_t size_of_hex_uuid = size_of_uuid * 2;
+
+               /* Skip to the table id part of the error message. */
+               table_to_refresh = strlen(table_cache_refresh_search_str);
+               if (strlen(table_to_refresh) < size_of_hex_uuid)
+                       /* Unexpected table id size; ignore table cache refreshing. */
+                       table_to_refresh = NULL;
+               else
+               {
+                       /* Trim off the rest of the message. */
+                       *(table_to_refresh  size_of_hex_uuid) = '\0';
+                       /* Duplicate the string to safely FreeErrorData below. */
+                       table_to_refresh = pstrdup(table_to_refresh);
+               }
+       }
+       need_table_cache_refresh = table_to_refresh != NULL;
+
+
+       /*
+        * Get the latest syscatalog version from the master to check if we need
+        * to refresh the cache.
+        */
+       uint64_t catalog_master_version = 0;
+       PgGate_GetCatalogMasterVersion(&catalog_master_version);
+       need_global_cache_refresh =
+               k2pg_catalog_cache_version != catalog_master_version;
+       if (!(need_global_cache_refresh || need_table_cache_refresh))
+               return;
+
+       /*
+        * Reset catalog version so that the cache gets marked as invalid and
+        * will be refreshed after the txn ends.
+        */
+       if (need_global_cache_refresh)
+               k2pg_need_cache_refresh = true;
+
+       /*
+        * Prepare to retry the query if possible.
+        */
+       if (is_retryable_err)
+       {
+               /*
+                * For single-query transactions we abort the current
+                * transaction to undo any already-applied operations
+                * and retry the query.
+                *
+                * For transaction blocks we would have to re-apply
+                * all previous queries and also continue the
+                * transaction for future queries (before commit).
+                * So we just re-throw the error in that case.
+                *
+                */
+               if (consider_retry && !IsTransactionBlock())
+               {
+                       /* Clear error state */
+                       FlushErrorState();
+                       FreeErrorData(edata);
+
+                       /* Abort the transaction and clean up. */
+                       AbortCurrentTransaction();
+//                     if (AM_WAL_SENDER)
+//                             WalSndErrorCleanup();
+
+//                     if (MyReplicationSlot != NULL)
+//                             ReplicationSlotRelease();
+
+//                     ReplicationSlotCleanup();
+
+                       if (u_sess->postgres_cxt.doing_extended_query_message)
+                               u_sess->postgres_cxt.ignore_till_sync = true;
+
+                       t_thrd.postgres_cxt.xact_started = false;
+
+                       /* Refresh cache now so that the retry uses latest version. */
+                       if (need_global_cache_refresh)
+                               K2PgRefreshCache();
+                       else
+                       {
+                               /* need_table_cache_refresh */
+                               ereport(LOG,
+                                               (errmsg("invalidating table cache entry %s",
+                                                               table_to_refresh)));
+                               HandleK2PgStatus(PgGate_InvalidateTableCacheByTableId(table_to_refresh));
+                       }
+
+                       *need_retry = true;
+               }
+                       *need_retry = true;
+               }
+               else
+               {
+                       if (need_global_cache_refresh)
+                               ereport(ERROR,
+                                               (errcode(ERRCODE_INTERNAL_ERROR),
+                                                errmsg("Catalog Version Mismatch: A DDL occurred "
+                                                               "while processing this query. Try Again.")));
+                       else
+                       {
+                               /* need_table_cache_refresh */
+                               ereport(ERROR,
+                                               (errcode(ERRCODE_INTERNAL_ERROR),
+                                                errmsg("%s", edata->message)));
+                       }
+               }
+       }
+       else
+       {
+               /* Clear error state */
+               FlushErrorState();
+               FreeErrorData(edata);
+       }
+}
+/*
+ * Parse query tree via pg_parse_query, suppressing log messages below ERROR level.
+ * This is useful e.g. for avoiding "not supported yet and will be ignored" warnings.
+ */
+static List* k2pg_parse_query_silently(const char *query_string)
+{
+       List* parsetree_list;
+
+       int prev_log_min_messages    = log_min_messages;
+       int prev_client_min_messages = client_min_messages;
+       PG_TRY();
+       {
+               log_min_messages    = ERROR;
+               client_min_messages = ERROR;
+               parsetree_list      = pg_parse_query(query_string);
+               log_min_messages    = prev_log_min_messages;
+               client_min_messages = prev_client_min_messages;
+       }
+       PG_CATCH();
+       {
+               log_min_messages    = prev_log_min_messages;
+               client_min_messages = prev_client_min_messages;
+               PG_RE_THROW();
+       }
+       PG_END_TRY();
+
+       return parsetree_list;
+}
+
+/*
+ * Parse query tree via pg_parse_query, suppressing log messages below ERROR level.
+ * This is useful e.g. for avoiding "not supported yet and will be ignored" warnings.
+ */
+static List* k2pg_parse_query_silently(const char *query_string)
+{
+       List* parsetree_list;
+
+       int prev_log_min_messages    = log_min_messages;
+       int prev_client_min_messages = client_min_messages;
+       PG_TRY();
+       {
+               log_min_messages    = ERROR;
+               client_min_messages = ERROR;
+               parsetree_list      = pg_parse_query(query_string);
+               log_min_messages    = prev_log_min_messages;
+               client_min_messages = prev_client_min_messages;
+       }
+       PG_CATCH();
+       {
+               log_min_messages    = prev_log_min_messages;
+               client_min_messages = prev_client_min_messages;
+               PG_RE_THROW();
+       }
+       PG_END_TRY();
+
+       return parsetree_list;
+}
+
+static const char* k2pg_parse_command_tag(const char *query_string)
+{
+       List* parsetree_list = k2pg_parse_query_silently(query_string);
+
+       if (list_length(parsetree_list) > 0) {
+        Node* raw_parse_tree = (Node*)linitial(parsetree_list);
+        return CreateCommandTag(raw_parse_tree);
+       } else {
+               return NULL;
+       }
+}
+
+/*
+ * Only retry SELECT, INSERT, UPDATE and DELETE commands.
+ * Do the minimum parsing to find out what the command is
+ */
+static bool k2pg_check_retry_allowed(const char *query_string)
+{
+       if (!query_string)
+               return false;
+
+       const char* command_tag = k2pg_parse_command_tag(query_string);
+       if (!command_tag)
+               return false;
+
+       return (strncmp(command_tag, "DELETE", 6) == 0 ||
+               strncmp(command_tag, "INSERT", 6) == 0 ||
+               strncmp(command_tag, "SELECT", 6) == 0 ||
+               strncmp(command_tag, "UPDATE", 6) == 0);
+}
+
+
+static void K2PgCheckSharedCatalogCacheVersion() {
+       /*
+        * We cannot refresh the cache if we are already inside a transaction, so don't
+        * bother checking shared memory.
+        */
+       if (t_thrd.postgres_cxt.xact_started)
+               return;
+
+       /*
+        * Don't check shared memory if we are in initdb. E.g. during initial system
+        * catalog snapshot creation, tablet servers may not be running.
+        */
+       if (K2PgIsInitDbModeEnvVarSet())
+               return;
+
+       uint64_t shared_catalog_version;
+       HandleK2PgStatus(PgGate_GetSharedCatalogVersion(&shared_catalog_version));
+
+       if (k2pg_catalog_cache_version < shared_catalog_version) {
+               K2PgRefreshCache();
+       }
+}
+
+
+#+END_SRC
+
+#+NAME: src/gausskernel/process/tcop/utility.cpp
+#+BEGIN_SRC c
+void CreateCommand(CreateStmt *parse_tree, const char *query_string, ParamListIn, ...) {
+  /* No need for toasting attributes in K2PG mode */
+}
+oid standard_ProcessUtility(Node* parse_tree, const char* query_string, ...) {
+               case TRANS_STMT_PREPARE:
+  if(IsK2PgEnabled()) {
+    ereport(ERROR,
+      (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+      errmsg("PREPARE not supported by K2PG yet")));
+  }
+ 
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/runtime/executor/execMain.cpp
+#+BEGIN_SRC c
+void ExecConstraints(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,...) {
+  // Comment following
+  // Form_pg_attribute att = TupleDescAttr(tupdesc, attrChk - 1);
+
+  // if (mtstate && mtstate->k2pg_mt_is_single_row_update_or_delete &&
+  //     !bms_is_member(att->attnum - K2PgGetFirstLowInvalidAttributeNumber(rel), modifiedCols))
+  // {
+  //      /*
+  //       * For single-row-updates, we only know the values of the
+  //       * modified columns. But in this case it is safe to skip the
+  //       * unmodified columns anyway.
+  //       */
+  //      continue;
+  // }
+
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/runtime/executor/execScan.cpp
+#+BEGIN_SRC c
+TupleTableSlot* ExecScan(ScanState* node, ExecScanAccessMtd access_mtd, ...) {
+  if (IsK2PgEnabled()) {
+    if (slot->tts_tuple != NULL) {
+      // assign tts_k2pgctid for slot
+      HEAPTUPLE_COPY_K2PGTID(((HeapTuple)(slot->tts_tuple))->t_k2pgctid, slot->tts_k2pgctid);
+    }
+  }
+
+  if (IsK2PgEnabled()) {
+    if (slot->tts_k2pgctid != 0) {
+      HEAPTUPLE_COPY_K2PGTID(slot->tts_k2pgctid, result_slot->tts_k2pgctid);
+    } else if (slot->tts_tuple != NULL && ((HeapTuple)slot->tts_tuple)->t_k2pgctid != 0) {
+      HEAPTUPLE_COPY_K2PGTID(((HeapTuple)slot->tts_tuple)->t_k2pgctid, result_slot->tts_k2pgctid);
+    } else {
+      elog(DEBUG1, "Could not find k2pgctid from slot");
+    }
+  }
+ 
+}
+
+#+END_SRC
+
+#+NAME: src/gausskernel/runtime/executor/execUtils.cpp
+#+BEGIN_SRC c
+EState* CreateExecutorState(void) {
+       /*
+        * K2PG-specific fields
+        */
+       estate->k2pg_conflict_slot = NULL;
+
+}
+void ExecDeleteIndexTuples(TupleTableSlot* slot, ItemPointer tupleid, EState*, ...) {
+  //-        index_delete(actualindex, values, isnull, tupleid);
+  ItemPointer t_self = IsK2PgRelation(actualindex) ? (ItemPointer)K2PgGetPgTupleIdFromSlot(slot) : tupleid;
+  index_delete(actualindex, values, isnull, t_self);
+}
+          */
+#+END_SRC
+
+#+NAME: src/gausskernel/runtime/executor/nodeForeignscan.cpp
+#+BEGIN_SRC c
+static TupleTableSlot* ForeignNext(ForeignScanState* node) {
+               if (IsK2Mode()) {
+                       tup->t_k2pgctid = slot->tts_k2pgctid;
+               }
+}
+#+END_SRC
+
+#+NAME: 
+#+BEGIN_SRC c
+static TupleTableSlot* IndexOnlyNext(IndexOnlyScanState* node) {
+                /*
+                * Fill the scan tuple slot with data from the index.  This might be
+                * provided in either HeapTuple or IndexTuple format.  Conceivably an
+                * index AM might fill both fields, in which case we prefer the heap
+                * format, since it's probably a bit cheaper to fill a slot from.
+                 */
+// -        StoreIndexTuple(slot, indexScan->xs_itup, indexScan->xs_itupdesc);
+               if (scandesc->xs_hitup)
+               {
+                       /*
+                        * We don't take the trouble to verify that the provided tuple has
+                        * exactly the slot's format, but it seems worth doing a quick
+                        * check on the number of fields.
+                        */
+                       Assert(slot->tts_tupleDescriptor->natts ==
+                                  scandesc->xs_hitupdesc->natts);
+                       ExecStoreTuple(scandesc->xs_hitup, slot, InvalidBuffer, false);
+               }
+               else if (scandesc->xs_itup)
+                       StoreIndexTuple(slot, scandesc->xs_itup, scandesc->xs_itupdesc);
+               else
+                       elog(ERROR, "no data returned for index-only scan");
+ 
+#+END_SRC
+
+#+NAME: src/gausskernel/runtime/executor/nodeModifyTable.cpp
+#+BEGIN_SRC c
+static Oid ExecUpsert(ModifyTableState* state, TupleTableSlot* slot, ..) {
+                       if (!IsK2PgRelation(resultRelationDesc)) {
+                               // K2PG does not use Postgres transaction control code.
+                 ExecCheckTIDVisible(targetrel, estate, targetrel, &conflictInfo.conflictTid);
+            }
+}
+
+static Oid ExecUpsert(ModifyTableState* state, TupleTableSlot* slot, ...) {
+       if (IsK2PgRelation(resultRelationDesc))
+       {
+        newid = K2PgHeapInsert(slot, (HeapTuple)tuple, estate);
+        /* insert index entries for tuple */
+               if (K2PgRelInfoHasSecondaryIndices(resultRelInfo)) {
+            ItemPointer item = (ItemPointer)DatumGetPointer(((HeapTuple)tuple)->t_k2pgctid);
+            recheckIndexes = ExecInsertIndexTuples(slot, item, estate, heaprel, partition, bucketid, &specConflict, NULL);
+        }
+       }
+}
+
+TupleTableSlot* ExecInsertT(ModifyTableState* state, TupleTableSlot* slot, TupleTableSlot* planSlot, EState* estate,
+     bool canSetTag, int options, List** partitionList) {
+       /*
+        * The attribute "k2pg_conflict_slot" is only used within ExecInsert.
+        * Initialize its value to NULL.
+        */
+       estate->k2pg_conflict_slot = NULL;
+                if (IsK2PgRelation(result_relation_desc)) {
+                    pTSelf = (ItemPointer)DatumGetPointer(K2PgGetPgTupleIdFromSlot(slot));
+
+
+if (IsK2PgRelation(result_relation_desc))
+       {
+               bool row_found = K2PgExecuteDelete(result_relation_desc, planSlot, estate, node);
+               if (!row_found)
+               {
+                       /*
+                        * No row was found. This is possible if it's a single row txn
+                        * and there is no row to delete (since we do not first do a scan).
+                        */
+                       return NULL;
+               }
+
+               if (K2PgRelInfoHasSecondaryIndices(result_rel_info))
+               {
+                       /* Delete index entries of the old tuple
+            *
+            */
+            ItemPointer k2pg_ctid = (ItemPointer)DatumGetPointer(K2PgGetPgTupleIdFromSlot(planSlot));
+                       ExecDeleteIndexTuples(planSlot, k2pg_ctid, estate, part_relation, partition, NULL, false);
+               }
+}
+ if (IsK2PgRelation(result_relation_desc)) {
+                if (node->k2pg_mt_is_single_row_update_or_delete)
+                {
+                    slot = planSlot;
+                }
+                else
+                {
+                    slot = ExecFilterJunk(result_rel_info->ri_junkFilter, planSlot);
+                }
+
+if (IsK2PgRelation(result_relation_desc)) {
+        // TODO: double check the logic here
+
+               /*
+                * Check the constraints of the tuple.
+                */
+        if (result_relation_desc->rd_att->constr) {
+            if (node->mt_insert_constr_slot == NULL) {
+                ExecConstraints(result_rel_info, slot, estate);
+            } else {
+                ExecConstraints(result_rel_info, node->mt_insert_constr_slot, estate);
+            }
+        }
+
+               RangeTblEntry *rte = rt_fetch(result_rel_info->ri_RangeTableIndex,
+                                                                         estate->es_range_table);
+
+ols);
+
+               if (!row_found)
+               {
+                       /*
+                        * No row was found. This is possible if it's a single row txn
+                        * and there is no row to update (since we do not first do a scan).
+                        */
+                       return NULL;
+               }
+
+               /*
+                * Update indexes if needed.
+                */
+               if (K2PgRelInfoHasSecondaryIndices(result_rel_info))
+               {
+            ItemPointer item = (ItemPointer)DatumGetPointer(((HeapTuple)tuple)->t_k2pgctid);
+                       /* Delete index entries of the old tuple */
+            ExecDeleteIndexTuples(slot, item, estate, fake_part_rel, partition, NULL, false);
+
+                       /* Insert new index entries for tuple */
+            List* recheckIndexes = ExecInsertIndexTuples(slot, item, estate, fake_part_rel, partition, bucketid, NULL, NULL);
+               }
+                                ItemPointer item;
+                                if (IsK2PgRelation(fake_insert_relation))
+                                {
+                                    item = (ItemPointer)DatumGetPointer(((HeapTuple)tuple)->t_k2pgctid);
+                                } else {
+                                    item = &(((HeapTuple)tuple)->t_self);
+                                }
+
+               /*
+                * Prepare the updated tuple in inner slot for RETURNING clause execution.
+                * For ON CONFLICT DO UPDATE, the INSERT returning clause is setup
+                * differently, so junkFilter is not needed.
+                */
+               if (IsK2PgRelation(result_relation_desc) && result_rel_info->ri_junkFilter)
+                       slot = ExecFilterJunk(result_rel_info->ri_junkFilter, planSlot);
+
+
+}
+
+TupleTableSlot* ExecModifyTable(ModifyTableState* node) {
+
+                               /*
+                                * For K2PG relations extract the old row from the wholerow junk
+                                * attribute if needed.
+                                * 1. For tables with secondary indexes we need the (old) k2pgctid for
+                                *    removing old index entries (for UPDATE and DELETE)
+                                * 2. For tables with row triggers we need to pass the old row for
+                                *    trigger execution.
+                                */
+                               if (IsK2PgRelation(result_rel_info->ri_RelationDesc) &&
+                                       (K2PgRelInfoHasSecondaryIndices(result_rel_info) ||
+                                       K2PgRelHasOldRowTriggers(result_rel_info->ri_RelationDesc,
+                                                              operation)))
+                               {
+                               resno = ExecFindJunkAttribute(junk_filter, "wholerow");
+                                       datum = ExecGetJunkAttribute(slot, resno, &isNull);
+
+                                       /* shouldn't ever get a null result... */
+                                       if (isNull)
+                                               elog(ERROR, "wholerow is NULL");
+
+                    old_tuple = DatumGetHeapTupleHeader(datum);
+                                       resno = ExecFindJunkAttribute(junk_filter, "k2pgctid");
+                                       datum = ExecGetJunkAttribute(slot, resno, &isNull);
+
+                                       /* shouldn't ever get a null result... */
+                                       if (isNull)
+                                               elog(ERROR, "k2pgctid is NULL");
+
+                                       // old_tuple->t_k2pgctid = datum;
+
+                                       // // oldtuple = &oldtupdata;
+                    tuple_id = (ItemPointer)DatumGetPointer(datum);
+                    tuple_ctid = *tuple_id; /* be sure we don't free ctid!! */
+                    tuple_id = &tuple_ctid;
+
+}
+ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, ...) {
+ mt_state->k2pg_mt_is_single_row_update_or_delete = K2PgIsSingleRowUpdateOrDelete(node);
+ //               junk_filter_needed = true;
+                               /*
+                                * If it's a K2PG single row UPDATE/DELETE we do not perform an
+                                * initial scan to populate the k2pgctid, so there is no junk
+                                * attribute to extract.
+                                */
+                               junk_filter_needed = !mt_state->k2pg_mt_is_single_row_update_or_delete;
+                 break;
+                    if (IsK2PgRelation(result_rel_info->ri_RelationDesc))
+                                       {
+                                               j->jf_junkAttNo = ExecFindJunkAttribute(j, "k2pgctid");
+                                               if (!AttributeNumberIsValid(j->jf_junkAttNo)) {
+                                                       elog(ERROR, "could not find junk k2pgctid column");
+                                               }
+                                       }
+                    else if (relkind == RELKIND_RELATION) {
+                         j->jf_junkAtt
+}
+
+#+END_SRC
+
+#+NAME: rc/gausskernel/storage/access/common/heaptuple.cpp
+#+BEGIN_SRC c
+ bool heap_attisnull(HeapTuple tup, int attnum, TupleDesc tupDesc) {
++       case K2PgTupleIdAttributeNumber:
++           /* If selected, virtual K2PG columns are never null */
++           break;
+}
+ Datum heap_getsysattr(HeapTuple tup, int attnum, TupleDesc tupleDesc, ) {
++               case K2PgTupleIdAttributeNumber:
++                       result = tup->t_k2pgctid;
++                       break;
+}
+HeapTuple heap_copytuple(HeapTuple tuple) {
++    HEAPTUPLE_COPY_K2PGTID(tuple->t_k2pgctid, newTuple->t_k2pgctid);
+}
+void heap_copytuple_with_tuple(HeapTuple src, HeapTuple dest) {
+HEAPTUPLE_COPY_K2PGTID(src->t_k2pgctid, dest->t_k2pgctid);
+}
+HeapTuple heap_form_tuple(TupleDesc tupleDescriptor, Datum *values, bool *isnull) {
+   tuple->t_k2pgctid = 0;
+}
+HeapTuple heap_form_tuple(TupleDesc tupleDescriptor, Datum *values, bool *isnull, ...) {
+    /* We also make sure that t_ctid is invalid unless explicitly set */
++    ItemPointerSetInvalid(&(td->t_ctid));
+ 
+}
+HeapTuple heap_modify_tuple(HeapTuple tuple, TupleDesc tupleDesc, Datum *replVal) {
+HEAPTUPLE_COPY_K2PGTID(tuple->t_k2pgctid, newTuple->t_k2pgctid);
+}
+ HeapTuple heap_tuple_from_minimal_tuple(MinimalTuple mtup) {
+result->t_k2pgctid = 0;
+}
+
+HeapTuple heap_slot_copy_heap_tuple(TupleTableSlot *slot) {
++    HeapTuple tup = heap_form_tuple(slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
++    if (slot->tts_k2pgctid != 0) {
++        HEAPTUPLE_COPY_K2PGTID(slot->tts_k2pgctid, tup->t_k2pgctid);
++    } else if (slot->tts_tuple != NULL && ((HeapTuple)slot->tts_tuple)->t_k2pgctid != 0) {
++        HEAPTUPLE_COPY_K2PGTID(((HeapTuple)slot->tts_tuple)->t_k2pgctid, tup->t_k2pgctid);
++    }
++    return tup;
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/access/heap/heapam.cpp
+#+BEGIN_SRC c
+static void initscan(HeapScanDesc scan, ScanKey key, bool is_rescan) {
+scan->rs_ctup.t_k2pgctid = (Datum) 0;
+// Skip RelationIsBucket(relation)
+}
+static HeapScanDesc heap_beginscan_internal(Relation relation, Snapshot snapshot, ...) {
++       /* K2PG scan methods should only be used for tables that are handled by K2 PgGate. */
++       if (IsK2PgRelation(relation))
++       {
++        // TODO: check to see if we need to set and pass in bool temp_snap
++               return cam_heap_beginscan(relation, snapshot, nkeys, key, false);
++       }
++
+}
+
+void heap_endscan(TableScanDesc sscan) {
++
++       if (IsK2PgRelation(scan->rs_base.rs_rd))
++       {
++               return cam_heap_endscan(scan);
++       }
++
+}
+void heap_endscan(TableScanDesc sscan) {
++
++       if (IsK2PgRelation(scan->rs_base.rs_rd))
++       {
++               return cam_heap_endscan(scan);
++       }
++
+}
+HeapTuple heap_getnext(TableScanDesc sscan, ScanDirection direction) {
++
++       if (IsK2PgRelation(scan->rs_base.rs_rd))
++       {
++               return cam_heap_getnext(scan);
++       }
++
+}
+Oid heap_insert(Relation relation, HeapTuple tup, CommandId cid, int options, ...) {
+ +    if (IsK2PgRelation(relation)) {
++        return K2PgExecuteInsert(relation, RelationGetDescr(relation), tup);
++    }
+}
+int heap_multi_insert(Relation relation, Relation parent, HeapTuple* tuples, ...) {
++    if (IsK2PgRelation(relation))
++    {
++           ereport(ERROR,
++                   (errcode(ERRCODE_INTERNAL_ERROR),
++                           errmsg("Operation not allowed in K2PG mode")));
++    }
++
+}
+
+TM_Result heap_delete(Relation relation, ItemPointer tid, CommandId cid,...) {
++    if (IsK2PgRelation(relation)) {
++        ereport(ERROR, (errcode(ERRCODE_INVALID_OPERATION), errmsg("Invalid call on heap_delete for k2 relation %d", relation->_i
+d)));
+}
+
+void simple_heap_delete(Relation relation, ItemPointer tid, int options, ...) {
+void simple_heap_delete(Relation relation, ItemPointer tid, int options, bool al
+     TM_Result result;
+     TM_FailureData tmfd;
+ 
++    if (IsK2PgRelation(relation)) {
++        ereport(ERROR, (errcode(ERRCODE_INVALID_OPERATION), errmsg("Invalid call on simple_heap_delete for k2 relation %d", relio
+n->rd_id)));                                                                                                                     
++    }
+}
+
+void simple_heap_update(Relation relation, ItemPointer otid, HeapTuple tup)
++{
++    if (IsK2PgRelation(relation)) {
++        K2PgUpdateSysCatalogTuple(relation, NULL, tup);
++    } else {
++        simple_heap_update_internal(relation, otid, tup);
++    }
++}
++void simple_heap_update_internal(Relation relation, ItemPointer otid, HeapTuple tup) {
++    /*
++        * This will only be used for non-K2PG tuples (e.g. Temp tables) so we just
++        * need to set the k2pgctid to 0 (NULL) here.
++        */
++       tuple->t_k2pgctid = (Datum) 0;
++
+}
+
+void heap_inplace_update(Relation relation, HeapTuple tuple) {
+       if (IsK2PgEnabled())
++       {
++               K2PgUpdateSysCatalogTuple(relation, NULL /* oldtuple */, tuple);
++               return;
++       }
++
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/access/index/genam.cpp
+#+BEGIN_SRC c
+RelationGetIndexScan(Relation index_relation, int nkeys, int norde, ...) {
++       scan->xs_hitup = NULL;
++       scan->xs_hitupdesc = NULL;
+}
+
+SysScanDesc systable_beginscan(Relation heap_relation, Oid index_id, bool, ) {
++       if (IsK2PgEnabled())
++       {
++               return cam_systable_beginscan(heap_relation,
++                                             index_id,
++                                             index_ok,
++                                             snapshot,
++                                             nkeys,
++                                             key);
++       }
+
+}
+
+HeapTuple systable_getnext(SysScanDesc sysscan) {
++       if (IsK2PgEnabled())
++       {
++               return cam_systable_getnext(sysscan);
++       }
+}
+
+bool systable_recheck_tuple(SysScanDesc sysscan, HeapTuple tup) {
++    if (sysscan->k2scan) {
++        return true;
++    }
+}
+
+HeapTuple systable_getnext_back(SysScanDesc sysscan) {
+       if (sysscan->scan != NULL) {
+             htup = heap_getnext((TableScanDesc) (sysscan->scan), BackwardScanDirection);
++        } else {
++            if (IsK2PgEnabled()) {
++                htup = cam_systable_getnext(sysscan);
++            } else {
++                ereport(ERROR, (errmsg("HeapScan in SysScanDesc is null")));
++            }
++        }
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/access/index/indexam.cpp
+#+BEGIN_SRC c
+void index_close(Relation relation, LOCKMODE lockmode) {
+  // Skip bucket close for k2pg
+}
+
+void index_delete(Relation index_relation, Datum* values, const bool* isnull, ItemPointer heap_t_ctid) {
++    if (IsK2PgRelation(index_relation)) {
++        Datum k2pgctid = PointerGetDatum(heap_t_ctid);
++               K2PgExecuteDeleteIndex(index_relation, values, isnull, k2pgctid);
++    } 
+}
+
+Tuple IndexFetchTuple(IndexScanDesc scan) {
++       /*
++        * For K2PG secondary indexes, there are two scenarios.
++        * - If K2PG returns an index-tuple, the returned k2pgctid value should be used to query data.
++        * - If K2PG returns a heap_tuple, all requested data was already selected in the tuple.
++        */
++       if (IsK2PgEnabled())
++       {
++               if (scan->xs_hitup != 0)
++                       return scan->xs_hitup;
++               return CamFetchTuple(scan->heapRelation, scan->xs_ctup.t_k2pgctid);
++       }
++
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/access/table/tableam.cpp
+#+BEGIN_SRC c
+List *HeapamTopsExecUpdateIndexTuples(TupleTableSlot *slot, TupleTableSlot *olds, ...) {
+  // why tupleid is not used here?
++    ItemPointer item;
++    if (IsK2PgRelation(relation))
++    {
++        item = (ItemPointer)DatumGetPointer(((HeapTuple)tuple)->t_k2pgctid);
++    } else {
++        item = &(((HeapTuple)tuple)->t_self);
++    }
++    recheckIndexes = ExecInsertIndexTuples(slot, item, exec_index_tuples_state.estate,
+}
+#+END_SRC
+
+
+#+NAME: src/gausskernel/storage/access/transam/varsup.cpp
+#+BEGIN_SRC c
++/*
++ * Number of OIDs to prefetch (preallocate) in K2PG setup.
++ * Given there are multiple Postgres nodes, each node should prefetch
++ * in smaller chunks.
++ */
++#define K2PG_OID_PREFETCH              256
++
+Oid GetNewObjectId(bool IsToastRel) {
++               if (IsK2PgEnabled())
++               {
++                       Oid begin_oid = InvalidOid;
++                       Oid end_oid   = InvalidOid;
++
++            K2PgReservePgOids(u_sess->proc_cxt.MyDatabaseId,
++                        t_thrd.xact_cxt.ShmemVariableCache->nextOid,
++                                   K2PG_OID_PREFETCH,
++                                   &begin_oid,
++                                   &end_oid);
++
++            t_thrd.xact_cxt.ShmemVariableCache->nextOid = begin_oid;
++                       t_thrd.xact_cxt.ShmemVariableCache->oidCount = end_oid - begin_oid;
++               }
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/access/transam/xact.cpp
+#+BEGIN_SRC c
+static TransactionId RecordTransactionCommit(void) {
++       if (IsK2PgEnabled())
++       {
++               return latestXid;
++       }
+
+}
+
+static void PrepareTransaction(bool STP_commit) {
++    if (!IsK2PgEnabled()) {
+         PostPrepare_Locks(xid);
+         PostPrepare_PredicateLocks(xid);
++    }
+
+static void AbortTransaction(bool PerfectRollback, bool STP_rollback) {
+    if (!IsK2PgEnabled()) {
+         LockErrorCleanup();
++    }
+
+}
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/buffer/bufmgr.cpp
+#+BEGIN_SRC c
+BlockNumber RelationGetNumberOfBlocksInFork(Relation relation, ForkNumber fork_num, bool estimate) {
++
++    if (IsK2PgBackedRelation(relation)) {
++        return result;
++    }
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/ipc/ipc.cpp
+#+BEGIN_SRC c
+void proc_exit(int code) {
++       if (IsK2PgEnabled())
++               K2PgOnPostgresBackendShutdown();
++
+}
+#+END_SRC
+
+#+NAME: src/gausskernel/storage/mot/fdw_adapter/mot_fdw.cpp
+#+BEGIN_SRC c
+Datum mot_fdw_handler(PG_FUNCTION_ARGS) {
+-    fdwroutine->AnalyzeForeignTable = MOTAnalyzeForeignTable;
+-    fdwroutine->AcquireSampleRows = MOTAcquireSampleRowsFunc;
++    fdwroutine->AnalyzeForeignTable = NULL;
++    fdwroutine->AcquireSampleRows = NULL;
+ 
+}
+static void MOTEndForeignScan(ForeignScanState* node) {
+// comment
+}
+#+END_SRC
+
+#+NAME: src/include/access/htup.h
+#+BEGIN_SRC c
+typedef struct HeapTupleData {
+Datum              t_k2pgctid;             /* virtual column k2pgctid */
+}
+#+END_SRC
+
+#+NAME: src/include/access/itup.h
+#+BEGIN_SRC c
+ typedef struct IndexTupleData {
++       Datum                   t_k2pgctid;     /* virtual column k2pgctid */
+ }
+
++/* Copy k2pgctid from a source tuple to a new / destination tuple */
++
++#define HEAPTUPLE_COPY_K2PGTID(src, dest)                            \
++    do {                                                            \
++            dest = (src == 0) ? 0 :                                 \
++                PointerGetDatum(cstring_to_text_with_len(VARDATA_ANY(src), \
++                                                         VARSIZE_ANY_EXHDR(src))); \
++    } while (false)
+ 
+#+END_SRC
+
+#+NAME: src/include/access/relscan.h
+#+BEGIN_SRC c
+typedef struct HeapScanDescData {
+bool rs_temp_snap;      /* unregister snapshot at scan end? */
+}
+
+typedef struct HeapScanDescData {
+CamScanDesc        k2scan;                 /* only valid in k2-scan case */
+}
+
+typedef struct IndexScanDescData {
++       HeapTuple       xs_hitup;               /* index data returned by AM, as HeapTuple */
++       TupleDesc       xs_hitupdesc;   /* rowtype descriptor of xs_hitup */
++
++       /* During execution, Postgres will push down hints to K2PG for performance purpose.
++        * (currently, only LIMIT values are being pushed down). All these execution information will
++        * kept in "k2pg_exec_params".
++        *
++        * - Generally, "k2pg_exec_params" is kept in execution-state. As Postgres executor traverses and
++        *   excutes the nodes, it passes along the execution state. Necessary information (such as
++        *   LIMIT values) will be collected and written to "k2pg_exec_params" in EState.
++        *
++        * - However, IndexScan execution doesn't use Postgres's node execution infrastructure. Neither
++        *   execution plan nor execution state is passed to IndexScan operators. As a result,
++        *   "k2pg_exec_params" is kept in "IndexScanDescData" to avoid passing EState to a lot of
++        *   IndexScan functions.
++        *
++        * - Postgres IndexScan function will call and pass "k2pg_exec_params" to PgGate to control the
++        *   index-scan execution in K2PG.
++        */
++       K2PgSelectLimitParams k2pg_exec_params;
++
+ 
+}
+
+typedef struct SysScanDescData {
++       Snapshot        snapshot;               /* snapshot to unregister at end of scan */
++    CamScanDesc        k2scan;                 /* only valid in k2-scan case */
+
+}
+#+END_SRC
+
+#+NAME: src/include/access/sysattr.h
+#+BEGIN_SRC c
++#define FirstLowInvalidHeapAttributeNumber (-8)
++#define K2PgTupleIdAttributeNumber                             (-8)
++#define K2PgFirstLowInvalidAttributeNumber             (-9)
+
++/*
++ * RowId is an auto-generated K2 record column used for tables without a
++ * primary key, but is not present in the postgres table.
++ *
++ * It is included here to reserve the number and for use in K2PG postgres
++ * code that requires knowledge about this column.
++ */
++#define K2PgRowIdAttributeNumber                                       (-100)
+ 
++#define K2PgIdxBaseTupleIdAttributeNumber                      (-101)
++#define K2PgUniqueIdxKeySuffixAttributeNumber          (-102)
++#define K2PgSystemFirstLowInvalidAttributeNumber       (-103)
+ 
+#+END_SRC
+
+#+NAME: src/include/catalog/pg_am.h
+#+BEGIN_SRC c
+2invacuumcleanup k2incanreturn k2incostestimate k2inoptions));
++DESCR("k2 b-tree index access method");
++#define K2INDEX_AM_OID 10030
++
+#+END_SRC
+
+#+NAME: src/include/catalog/pg_index.h
+#+BEGIN_SRC c
++/* Options for K2PG-based index */
++#define INDOPTION_HASH                 0x0004  /* values are hash-indexed */
++
+#+END_SRC
+
+#+NAME: src/include/catalog/pg_opclass.h
+#+BEGIN_SRC c
++/* k2index index to make index work */
++DATA(insert ( 10030    int4_ops         PGNSP    PGUID  10050    23    t    0));
++DATA(insert ( 10030    int2_ops         PGNSP    PGUID  10050    21    t    0));
++DATA(insert ( 10030    int8_ops         PGNSP    PGUID  10050    20    t    0));
++DATA(insert ( 10030    oid_ops          PGNSP    PGUID  10051    26    t    0));
++DATA(insert ( 10030    date_ops         PGNSP    PGUID  10052  1082    t    0));
++DATA(insert ( 10030    timestamp_ops    PGNSP    PGUID  10052  1114    t    0));
++DATA(insert ( 10030    timestamptz_ops  PGNSP    PGUID  10052  1184    t    0));
++DATA(insert ( 10030    float4_ops       PGNSP    PGUID  10053   700    t    0));
++DATA(insert ( 10030    float8_ops       PGNSP    PGUID  10053   701    t    0));
++DATA(insert ( 10030    numeric_ops      PGNSP    PGUID  10054  1700    t    0));
++DATA(insert ( 10030    text_ops         PGNSP    PGUID  10055    25    t    0));
++DATA(insert ( 10030    bpchar_ops       PGNSP    PGUID  10056  1042    t    0));
++DATA(insert ( 10030    time_ops         PGNSP    PGUID  10057  1083    t    0));
++DATA(insert ( 10030    timetz_ops       PGNSP    PGUID  10058  1266    t    0));
++DATA(insert ( 10030    money_ops        PGNSP    PGUID  10059   790    t    0));
++DATA(insert ( 10030    interval_ops     PGNSP    PGUID  10060  1186    t    0));
++DATA(insert ( 10030    tinterval_ops    PGNSP    PGUID  10061   704    t    0));
++DATA(insert ( 10030    int1_ops         PGNSP    PGUID  10062  5545    t    0));
++DATA(insert ( 10030    bool_ops         PGNSP    PGUID  10063    16    t    0));
++DATA(insert ( 10030    smalldatetime_ops  PGNSP  PGUID  10064  9003    t    0));
++DATA(insert ( 10030    name_ops         PGNSP    PGUID  10065   19     t    0));
++DATA(insert ( 10030    char_ops         PGNSP    PGUID  10066   18     t    0));
++DATA(insert ( 10030    array_ops        PGNSP    PGUID  10067   2277   t    0));
++DATA(insert ( 10030    bit_ops          PGNSP    PGUID  10068   1560   t    0));
++DATA(insert ( 10030    bytea_ops        PGNSP    PGUID  10069   17     t    0));
++DATA(insert ( 10030    abstime_ops      PGNSP    PGUID  10070   702    t    0));
++DATA(insert ( 10030    oidvector_ops    PGNSP    PGUID  10072   30     t    0));
++DATA(insert ( 10030    record_ops       PGNSP    PGUID  10073   2249   t    0));
++DATA(insert ( 10030    varbit_ops       PGNSP    PGUID  10074   1562   t    0));
++DATA(insert ( 10030    tid_ops          PGNSP    PGUID  10075   27     t    0));
++DATA(insert ( 10030    xid_ops          PGNSP    PGUID  10076   28     t    0));
++DATA(insert ( 10030    cid_ops          PGNSP    PGUID  10077   29     t    0));
++DATA(insert ( 10030    macaddr_ops      PGNSP    PGUID  10078   829    t    0));
+
+#+END_SRC
+
+#+NAME: src/include/catalog/pg_opfamily.h b/src/include/catalog/pg_opfamily.h
+#+BEGIN_SRC c
++// k2index op family to make index work
++DATA(insert OID = 10050 (10030    integer_ops      PGNSP    PGUID));
++DATA(insert OID = 10051 (10030    oid_ops          PGNSP    PGUID));
++DATA(insert OID = 10052 (10030    datetime_ops     PGNSP    PGUID));
++DATA(insert OID = 10053 (10030    float_ops        PGNSP    PGUID));
++DATA(insert OID = 10054 (10030    numeric_ops      PGNSP    PGUID));
++DATA(insert OID = 10055 (10030    text_ops         PGNSP    PGUID));
++DATA(insert OID = 10056 (10030    bpchar_ops       PGNSP    PGUID));
++DATA(insert OID = 10057 (10030    time_ops         PGNSP    PGUID));
++DATA(insert OID = 10058 (10030    timetz_ops       PGNSP    PGUID));
++DATA(insert OID = 10059 (10030    money_ops        PGNSP    PGUID));
++DATA(insert OID = 10060 (10030    interval_ops     PGNSP    PGUID));
++DATA(insert OID = 10061 (10030    tinterval_ops    PGNSP    PGUID));
++DATA(insert OID = 10062 (10030    int1_ops         PGNSP    PGUID));
++DATA(insert OID = 10063 (10030    bool_ops         PGNSP    PGUID));
++DATA(insert OID = 10064 (10030    smalldatetime_ops  PGNSP  PGUID));
++DATA(insert OID = 10065 (10030    name_ops         PGNSP    PGUID));
++DATA(insert OID = 10066 (10030    char_ops         PGNSP    PGUID));
++DATA(insert OID = 10067 (10030    array_ops        PGNSP    PGUID));
++DATA(insert OID = 10068 (10030    bit_ops          PGNSP    PGUID));
++DATA(insert OID = 10069 (10030    bytea_ops        PGNSP    PGUID));
++DATA(insert OID = 10070 (10030    abstime_ops      PGNSP    PGUID));
++DATA(insert OID = 10071 (10030    network_ops      PGNSP    PGUID));
++DATA(insert OID = 10072 (10030    oidvector_ops    PGNSP    PGUID));
++DATA(insert OID = 10073 (10030    record_ops       PGNSP    PGUID));
++DATA(insert OID = 10074 (10030    varbit_ops       PGNSP    PGUID));
++DATA(insert OID = 10075 (10030    tid_ops          PGNSP    PGUID));
++DATA(insert OID = 10076 (10030    xid_ops          PGNSP    PGUID));
++DATA(insert OID = 10077 (10030    cid_ops          PGNSP    PGUID));
++DATA(insert OID = 10078 (10030    macaddr_ops      PGNSP    PGUID));
+#+END_SRC
+
+#+NAME: /src/include/executor/tuptable.h
+#+BEGIN_SRC c
+typedef struct TupleTableSlot {
++       /* K2PG support */
++       Datum tts_k2pgctid; /* selected k2pgctid value */
+}
+
+#+END_SRC
+
+#+NAME: src/include/knl/knl_instance.h
+#+BEGIN_SRC c
++typedef struct knl_g_k2_context {
++    bool isK2ModelEnabled;
++} knl_g_k2_context;
+
+typedef struct knl_instance_context {
+ knl_g_k2_context k2_cxt;
+}
+#+END_SRC
+
+
+#+NAME: src/include/miscadmin.h
+#+BEGIN_SRC c
+#define IsK2Mode() (g_instance.k2_cxt.isK2ModelEnabled)
+#+END_SRC
+
+#+NAME: src/include/nodes/execnodes.h
+#+BEGIN_SRC c
+typedef struct EState {
+typedef struct EState {
+ #endif
+ 
+     PruningResult* pruningResult;
++
++       /*
++        * K2PG-specific fields
++        */
++    // TODO: add conflict handling logic for conflict tuples
++       TupleTableSlot *k2pg_conflict_slot; /* If a conflict is to be resolved when inserting data,
+rocessing and
+s resolved. */
+}
+
+typedef struct ModifyTableState {
++       /* K2PG specific attributes. */
++       bool k2pg_mt_is_single_row_update_or_delete;
+}
+#+END_SRC
+
+#+NAME: src/include/nodes/memnodes.h
+#+BEGIN_SRC c
+typedef struct MemoryContextData {
+K2PgMemctx k2pg_memctx;        /* Memory context for objects in k2 */
+}
+#+END_SRC
+
+#+NAME: src/include/nodes/parsenodes_common.h
+#+BEGIN_SRC c
+typedef struct Constraint {
++       /* For K2PG LSM primary or unique key defined inline with the table
++        * definition, we allow the key definition to include the sorting info
++        * like "create table (... primary key (h hash, r1 asc, r2 desc))".
++        * We save the IndexElem of the attributes in 'k2pg_index_params' to access
++        * the full definition of the key attributes.
++        */
++       List       *k2pg_index_params;  /* IndexElem nodes of UNIQUE or PRIMARY KEY
++                                                                        * constraint */
+}
+#+END_SRC
+
+#+NAME: src/include/nodes/plannodes.h
+#+BEGIN_SRC c
+typedef struct ModifyTable {
+      List       *k2PushdownTlist; /* tlist for the pushed down SET expressions */
+
+}
+#+END_SRC
+
+#+NAME: src/include/utils/be_module.h
+#+BEGIN_SRC c
+enum ModuleId {
+MOD_K2,           /* K2 */
+}
+#+END_SRC
+
+#+NAME: src/include/utils/palloc.h
+#+BEGIN_SRC c
+/*
++ * This enables running query-layer code in a multi-threaded constext by using
++ * thread-local variables instead of globals.
++ * Currently only used for expression evaluation in K2 PG (i.e. for pushdown).
++ */
++static inline bool IsMultiThreadedMode() {
++       /*
++        * Just checking if the memory infrastructure is initialized.
++        * TODO Consider using a specific global variable or compiler flag
++        * for this.
++        */
++       return CurrentMemoryContext == NULL;
++}
++
++extern MemoryContext GetThreadLocalCurrentMemoryContext();
++extern MemoryContext SetThreadLocalCurrentMemoryContext(MemoryContext memctx);
++
++static inline MemoryContext GetCurrentMemoryContext() {
++       if (IsMultiThreadedMode())
++       {
++               return (MemoryContext) GetThreadLocalCurrentMemoryContext();
++       }
++       else
++       {
++               return CurrentMemoryContext;
++       }
++}
++
+#+END_SRC
+
+#+NAME: src/include/utils/rel.h
+#+BEGIN_SRC c
+typedef struct RelationData {
+ Oid        rd_pkindex;             /* OID of primary key, if any */
+}
+
+#+END_SRC
+
+#+NAME: src/include/utils/selfuncs.h
+#+BEGIN_SRC c
++
++/*
++ * deconstruct_indexquals is a simple function to examine the indexquals
++ * attached to a proposed IndexPath.  It returns a list of IndexQualInfo
++ * structs, one per qual expression.
++ */
++typedef struct
++{
++       RestrictInfo *rinfo;            /* the indexqual itself */
++       int                     indexcol;               /* zero-based index column number */
++       bool            varonleft;              /* true if index column is on left of qual */
++       Oid                     clause_op;              /* qual's operator OID, if relevant */
++       Node       *other_operand;      /* non-index operand of qual's operator */
++} IndexQualInfo;
++
 #+END_SRC

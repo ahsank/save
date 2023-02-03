@@ -1,0 +1,54 @@
+MY PROJECT -*- mode: org -*-
+#+STARTUP: showall
+#+TITLE: TPcc
+
+* Code
+
+** Main
+
+Configs:
+
+- item_table_num_nodes
+- warehouse_tables_num_nodes
+- cpo
+- data_load true or false
+- num_instances
+- instance_id
+- num_warehouses
+- num_concurrent_txns
+- test_duration_s
+- partition_request_timeout
+- tso_timeout
+- dataload_txn_timeout
+- writes_per_load_txn
+- districts_per_warehouse
+- customers_per_district
+- do_verification
+- cpo_request_timeout
+- cpo_request_backoff
+- delivery_txn_batch_size
+- txn_weights :: multi token vector weight
+
+* Client
+
+1.Constructor
+   1. K23SI client
+   2. timer {_stopped = true }
+   3. gracefulStop
+      1. stopped = true
+      2. registerLowTransportMemoryObserver
+   4. registerMetrics ()
+   5. start
+      1. stopped = false
+      2. global id = (seastar::smp::count * _instance_id()) + seastar::this_shard_id();
+      3. _client. start
+         1. benchmark ()
+         2. handle_exception
+         3. cores_finished++
+         4. if do_verification do_with ConsistencyVerify verify.run
+      4. Appbase.stop() 
+   6. schema_load
+   7. data_load
+      1. if global id == 0
+         1. Create TPCC Collection
+         2. Create TPCCItem collection

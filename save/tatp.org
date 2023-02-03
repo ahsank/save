@@ -1,0 +1,267 @@
+MY PROJECT -*- mode: org -*-
+#+STARTUP: showall
+#+TITLE: Telecommunication Application Processing (TATP) benchmark
+
+* Summary
+
+- Spec :: https://tatpbenchmark.sourceforge.net/TATP_Description.pdf
+- telco application
+- resembles Home Location Register (HLR) database
+- information of subscribers and services
+- Run for sampling time (default two hours) 
+- Mean Qualified Throughput (MQTh) 
+- Response time distributions per transaction types
+- Seven types of txn
+- System Under Test (SUT) single computer
+- One or more cleint computers, can be Main control client and remote control clients.
+- Result stored in Test Input and Result Database (TIRDB)
+
+* Phases
+
+1. Database creation and population
+2. Idle time + ramp-up time
+3. Sampling time (actual benchmark test)
+4. Result output
+
+
+* Result
+
+- MQTh :: # of successful txn / sec
+- Response time distributin :: min 1 ms max 10 sec. Longer response times are discarded
+- TIRDB :: Result stored in
+
+* Schema
+
+** Subscriber
+
+- s_id :: Random unique from 1 to N, start N = 100,000, multiplied by factors 1, 2, 5, 10, 20, 50 so forth 
+- sub_nbr :: 15 digit number s_id with leading zeros
+- bit1 to bit_10 :: random 0 or 1
+- hex_1 to hex_10 :: random  0 to 15
+- byte2_1 to byte2_10 :: random 0 to 255
+- msc_location :: random 32 bit 
+- vlr_location :: random 32 bit
+
+** Access_Info
+
+from 1..4 per subscriber
+
+- s_id ::
+- ai_type :: random between 1 to 4, primary key (s_id, ai_type)
+- data1, data2 :: random byte
+- data3 :: char[3] uppper case A-Z.
+- data4 :: char[4] upper case A-Z
+
+** Special_Facility
+
+From 1..4 per subscriber 
+
+- s_id ::
+- sf_type :: random between 1 to 4, primary key (s_id, sf_type)
+- is_active :: 0 (15%) or 1 (85%)
+- error_cntrl :: random byte
+- data_a :: random byte
+- data_b :: char[5] upper case A-Z
+
+** Call_Forwarding
+
+From 0..3 per Special Facility
+- s_id ::
+- sf_type ::
+- start_time :: integer 0, 8 or 16, primary key (s_id, sf_type, start_time)
+- end_time :: integer value between 1 to 8
+- numberx :: random 15 digit string
+
+* Transactions
+
+** Read Txs
+
+80%
+
+#+NAME: GET_SUBSCRIBER_DATA 
+#+BEGIN_SRC sql
+-- 35% times
+-- s_id randomly chosen from 1 to P based on distribution, all 1 to P should exist in DB
+-- probability success 100%
+SELECT s_id, sub_nbr,
+ bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7,
+ bit_8, bit_9, bit_10,
+ hex_1, hex_2, hex_3, hex_4, hex_5, hex_6, hex_7,
+ hex_8, hex_9, hex_10,
+ byte2_1, byte2_2, byte2_3, byte2_4, byte2_5,
+ byte2_6, byte2_7, byte2_8, byte2_9, byte2_10,
+ msc_location, vlr_location
+FROM Subscriber
+WHERE s_id = <s_id rnd>;
+#+END_SRC
+
+#+NAME: GET_NEW_DESTINATION
+#+BEGIN_SRC sql
+-- 10% times
+-- probability success 23.9%
+
+select s_id=random(1,P), sf_type = random(1,4), start_time random({0, 8, 16}, end_time = random(1,24)
+
+SELECT cf.numberx
+FROM Special_Facility AS sf, Call_Forwarding AS cf
+WHERE
+ (sf.s_id = <s_id rnd>
+ AND sf.sf_type = <sf_type rnd>
+ AND sf.is_active = 1)
+ AND (cf.s_id = sf.s_id
+ AND cf.sf_type = sf.sf_type)
+ AND (cf.start_time \<= <start_time rnd>
+ AND <end_time rnd> \< cf.end_time);
+#+END_SRC
+
+#+NAME:
+#+BEGIN_SRC sql
+-- percentage times
+-- probability success
+
+#+END_SRC
+
+#+NAME: GET_ACCESS_DATA
+#+BEGIN_SRC sql
+-- percentage times 35%
+-- probability success: 62.5%
+
+select s_id = random(1,P), ai_type = random(1,4)
+SELECT data1, data2, data3, data4
+FROM Access_Info
+WHERE s_id = <s_id rnd>
+ AND ai_type = <ai_type rnd>
+
+#+END_SRC
+
+** Write Txs
+
+35%
+
+#+NAME: UPDATE_SUBSCRIBER_DATA
+#+BEGIN_SRC sql
+-- percentage times 2%
+-- probability success  62.5%.
+
+select subid=random(1,P), bit_1=rand(0,1), sf_type=rand(1,4), data_a_rnd = random(0, 255)
+
+UPDATE Subscriber
+SET bit_1 = <bit_rnd>
+WHERE s_id = <s_id rnd subid>;
+UPDATE Special_Facility
+SET data_a = <data_a rnd>
+WHERE s_id = <s_id value subid>
+ AND sf_type = <sf_type rnd>;
+
+#+END_SRC
+
+#+NAME: UPDATE_LOCATION
+#+BEGIN_SRC sql
+-- percentage times:  14%
+-- probability success: 100%
+
+select sub_nbr_rndstr = pad_front('0', 15, str(rand(1,P)))
+sub_
+UPDATE Subscriber
+SET vlr_location = <vlr_location rnd>
+WHERE sub_nbr = <sub_nbr rndstr>;
+#+END_SRC
+
+
+- INSERT_CALL_FORWARDING :: 2%
+
+#+NAME: INSERT_CALL_FORWARDING
+#+BEGIN_SRC sql
+-- percentage times 2%
+-- probability success: 31.25%
+select s_id=random(1,P), sf_type = random(1,4),
+  start_time = random({0, 8, 16}, end_time = random(1,24), numberx = pad('0', rand(1,P))
+
+SELECT <s_id bind subid s_id>
+FROM Subscriber
+WHERE sub_nbr = <sub_nbr rndstr>;
+
+SELECT <sf_type bind sfid sf_type>
+FROM Special_Facility
+WHERE s_id = <s_id value subid>:
+
+INSERT INTO Call_Forwarding
+VALUES (<s_id value subid>, <sf_type rnd sf_type>,
+ <start_time rnd>, <end_time rnd>, <numberx rndstr>);
+
+#+END_SRC
+
+- DELETE_CALL_FORWARDING :: 2%
+
+#+NAME: DELETE_CALL_FORWARDING
+#+BEGIN_SRC sql
+-- percentage times 2%
+-- probability success 31.25%
+select s_id=random(1,P), sf_type = random(1,4), start_time = random({0, 8, 16}
+
+SELECT <s_id bind subid s_id>
+FROM Subscriber
+WHERE sub_nbr = <sub_nbr rndstr>;
+
+DELETE FROM Call_Forwarding
+WHERE s_id = <s_id value subid>
+ AND sf_type = <sf_type rnd>
+ AND start_time = <start_time rnd>;
+
+#+END_SRC
+
+
+* Errors
+
+Accepptable errors:
+
+Acceptable errors are not included in stats.
+
+- Missing data because of randomly chosen ID
+- Unique constraint violation in insert call forwarding
+- foreign key constraint violation
+
+* Key vaue distribution
+
+Uniform or non-uniform (default).
+
+
+#+NAME:
+#+BEGIN_SRC sql
+NURand(A, x, y) = (((get_random(0, A) | get_random(x, y))) % (y – x + 1)) + x
+#+END_SRC
+
+| num rows n    |       A |
+|---------------+---------|
+| n <= 1M       |   65535 |
+| 1M < n <= 10M | 1048575 |
+| 10M < n       | 2097151 |
+
+
+* Configuration
+
+| Name                                            | Recommendation |
+|-------------------------------------------------+----------------|
+| Database file disk devices                      | 1              |
+| Log file disk devices                           | 1              |
+| Size of the shared buffer pool (database cache) | 0.5GB          |
+| Checkpoint interval                             | 30min          |
+| Transaction durability level                    | strict         |
+| Transaction isolation level                     | READ COMMITTED |
+| Disk write-back cache                           | disabled       |
+|                                                 |                |
+
+* Result
+
+- The number, size and speed of the disks. How the database data files, indexes, system
+catalogs, and logs are distributed over the disks.
+- Total amount of machine memory, amount of memory used for the database cache.
+- Number, model and speed of the CPUs.
+- Hardware model description.
+- Operating system name and version.
+- DBMS name and version.
+- A summary of configuration parameter values, following the list presented in the previous
+section
+- A copy of a product's configuration file for each product tested and each identifiable
+configuration used.
+
